@@ -72,7 +72,7 @@
 | DB | **PostgreSQL 17 + PostGIS** | 격자 폴리곤 공간질의. DuckDB는 동시 쓰기 불가라 운영 부적합 |
 | ORM | **SQLAlchemy 2.0 + Alembic** | 2인 협업에서 마이그레이션 없으면 DB가 갈라짐 |
 | 배치 저장 | **DuckDB** (중간 단계만) | 206개 CSV 198MB를 글롭 쿼리로 처리. 실측 265만행 5초 |
-| 공간 | GeoPandas · Shapely · pyproj | 격자 생성·공간조인 |
+| 공간 | **pyshp · Shapely · pyproj** | 격자 공간조인. GeoPandas 는 안 씀 — 셋이면 충분하고 GDAL 의존이 사라진다 |
 | 모델 | scikit-learn | 회귀·군집 |
 | 실시간 | **SSE** | 단방향이면 충분. 재연결이 브라우저 기본 제공 |
 | 배포 | Docker Compose | api + db + worker |
@@ -239,14 +239,14 @@ app.add_middleware(CORSMiddleware,
 |---|---|---|
 | 결과물 | `batch_*` 테이블 | 엔드포인트 10개 |
 | 핵심 난관 | 격자 공간조인 | 시뮬레이션·추천 재계산 |
-| 언어/도구 | pandas · DuckDB · GeoPandas | FastAPI · SQLAlchemy |
+| 언어/도구 | pandas · DuckDB · pyshp/shapely | FastAPI · SQLAlchemy |
 
 ### 담당 A — 데이터 파이프라인
 
 | # | 산출물 | 내용 |
 |---|---|---|
 | A1 | `01_fetch.py` | TAGO 정류소·노선, 경기도 배차, 똑버스 경유정류소 수집 → CSV |
-| A2 | `02_grid.py` ★ | **격자 shp ↔ 화성시 경계 공간조인** → 850격자 확정 · 읍면동 배정 |
+| A2 | `02_grid.py` ★ | ✅ **완료.** 격자 shp ↔ 화성시 경계 공간조인 → **786격자** · 읍면동 배정 |
 | A3 | `03_join.py` | ARS번호 매칭(실측 99.5%), 승하차 격자 배분, 철도역 거리 |
 | A4 | `04_model.py` | 수요 D · 공급 S · MI · 4분면 · 우선순위 · 회귀계수 |
 | A5 | `05_load.py` | `batch_grid` / `batch_grid_metrics` 적재 + `batch_run` 기록 |
@@ -310,9 +310,9 @@ B5는 그 위에 그리디 루프만 얹으면 된다.** B4를 전체 재계산�
 
 **남은 부분** — `meta.grid.sizeMeters: 250` 은 그대로다.
 실측: SGIS 공공데이터포털 배포판은 **1km 격자만** 제공(파일명 전부 `_1K`).
-화성시 실제 격자 **약 850개**.
+화성시 실제 격자 **786개** (`02_grid.py` 실측).
 
-→ `sizeMeters: 1000`, `cellCount: 약 850` 으로 수정 요청. (`displaySizeMeters: 1500` 은 화면 표시용이라 그대로 둬도 무방)
+→ `sizeMeters: 1000`, `cellCount: 786` 으로 수정 요청. (`displaySizeMeters: 1500` 은 화면 표시용이라 그대로 둬도 무방)
 
 ### ② `stops.profile` 시간대별 승하차 불가 🔴
 
@@ -382,8 +382,8 @@ const grid = await fetch("/api/v1/grid?period=am").then(r => r.json())
 
 ```bash
 # 공통
-pip install duckdb geopandas shapely pyproj scikit-learn fastapi uvicorn \
-            sqlalchemy alembic psycopg2-binary python-dotenv requests
+pip install duckdb pyshp shapely pyproj scikit-learn fastapi uvicorn \
+            sqlalchemy alembic psycopg2-binary python-dotenv requests pandas openpyxl
 
 # A: 배치 스키마
 duckdb warehouse.duckdb < analysis/schema.sql
@@ -406,7 +406,7 @@ psql -f server/schema_ops.sql
 
 | # | 요청 | 근거 |
 |---|---|---|
-| 1 | `meta.grid.sizeMeters` 250 → **1000**, `cellCount` → **약 850** | SGIS 배포판이 1km만 제공 (§8①) |
+| 1 | `meta.grid.sizeMeters` 250 → **1000**, `cellCount` → **786** | SGIS 배포판이 1km만 제공 (§8①) |
 | 2 | `stops.profile` 응답에 **`isEstimated: true`** 필드 추가 | 승하차 원본에 시간대 없음 (§8②) |
 | 3 | 정류소 ID 를 **ARS번호(모바일단축번호) 기준**으로 합의 | 매칭률 79.2% → 99.5% |
 | 4 | 사업비·내용연수 가정값임을 화면에 명시 | 추천 순위를 이 값이 좌우함 (§8④) |

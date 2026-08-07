@@ -28,6 +28,7 @@
 ├── analysis/                   데이터 파이프라인 (담당 A)
 │   ├── schema.sql              DuckDB 스키마 (배치 중간 저장)
 │   ├── 00_extract_hwaseong.py  전국 원본 → 화성시 추출
+│   ├── 02_grid.py              SGIS 격자 ↔ 화성시 공간조인  ✅ 완료
 │   └── check_api.py            공공데이터 API 키 검증
 ├── server/                     API 서버 (담당 B)
 │   └── schema_ops.sql          PostgreSQL 운영 스키마
@@ -45,7 +46,7 @@ git clone https://github.com/2026-AIHwaseong-project/hwaseong-dashboard-backend.
 cd hwaseong-dashboard-backend
 
 pip install pandas duckdb requests python-dotenv openpyxl
-# 담당 A 추가:  pip install geopandas shapely pyproj scikit-learn
+# 담당 A 추가:  pip install pyshp shapely pyproj scikit-learn
 # 담당 B 추가:  pip install fastapi uvicorn sqlalchemy alembic psycopg2-binary
 
 cp .env.example .env      # 발급받은 공공데이터포털 키를 넣으세요
@@ -64,7 +65,7 @@ python analysis/check_api.py
 |---|---|---|
 | 결과물 | `batch_*` 테이블 | 엔드포인트 10개 |
 | 최대 난관 | `02_grid.py` 격자 공간조인 | `POST /simulations` · `/recommendations` 재계산 |
-| 도구 | pandas · DuckDB · GeoPandas | FastAPI · SQLAlchemy |
+| 도구 | pandas · DuckDB · pyshp/shapely | FastAPI · SQLAlchemy |
 
 **인터페이스는 DB 스키마 하나뿐입니다.** A는 `batch_*` 에 쓰고, B는 `v_*` 뷰를 읽습니다.
 서로의 테이블을 건드리지 않으면 충돌이 없습니다.
@@ -83,8 +84,13 @@ python analysis/check_api.py
 | 배차간격 취득 | ✅ `peek/nPeek/nightAlloc` |
 | 똑버스 5개 노선 | ✅ API 조회 가능 |
 | 원본 데이터 수집 | ✅ 완료 |
-| 파이프라인 구현 | ⬜ 착수 전 |
+| 통신사 유동인구 | ❌ SKT 제공 불가 회신 — 대체 경로로 진행 |
+| **`02_grid.py` 격자 공간조인** | ✅ **완료 — 786격자.** 총인구 102.7만(실제 약 100만) |
+| `01_fetch.py` · `03_join.py` 이후 | ⬜ 착수 전 |
 | API 서버 | ⬜ 착수 전 |
+
+**최대 난관이던 격자 공간조인이 뚫렸습니다.** 검증 근거는
+[dataset_hwaseong/README.md](dataset_hwaseong/README.md) 참조.
 
 ---
 
