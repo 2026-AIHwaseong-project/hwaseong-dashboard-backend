@@ -32,8 +32,7 @@
 │   └── check_api.py            공공데이터 API 키 검증
 ├── server/                     API 서버 (담당 B)
 │   └── schema_ops.sql          PostgreSQL 운영 스키마
-├── dataset_hwaseong/           화성시 추출 데이터 (24.8MB, 커밋됨)
-├── prototypes/                 목업 프로토타입 (모델 로직 참고용)
+├── dataset_hwaseong/           화성시 추출 데이터 (25.0MB, 커밋됨)
 └── .env.example                환경변수 템플릿
 ```
 
