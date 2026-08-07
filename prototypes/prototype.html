@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>화성시 대중교통 수요·공급 미스매칭 분석 — 화면 초안</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#f4f6f8; --panel:#fff; --line:#dfe4ea; --ink:#1a2028; --dim:#6b7684;
+    --accent:#1b5e9e; --warn:#b2182b; --ok:#0f7b4f;
+    --r:8px;
+  }
+  body{font-family:"Malgun Gothic","맑은 고딕",-apple-system,system-ui,sans-serif;
+       background:var(--bg);color:var(--ink);font-size:13px;line-height:1.5}
+
+  header{background:#12293f;color:#fff;padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;font-weight:700;letter-spacing:-.3px}
+  header .sub{font-size:11.5px;color:#9db4c9}
+  .tag{background:#b2182b;color:#fff;font-size:10.5px;font-weight:700;
+       padding:3px 8px;border-radius:20px;letter-spacing:.3px}
+  .tag.ghost{background:transparent;border:1px solid #3d5a75;color:#9db4c9;font-weight:600}
+
+  .notice{background:#fff6e5;border-bottom:1px solid #f0dcae;padding:8px 20px;
+          font-size:11.5px;color:#7a5a12}
+  .notice b{color:#5c4209}
+
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:14px 20px 4px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:11px 13px}
+  .kpi .l{font-size:11px;color:var(--dim);margin-bottom:5px}
+  .kpi .v{font-size:21px;font-weight:700;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+  .kpi .v small{font-size:12px;font-weight:600;color:var(--dim);margin-left:2px}
+  .kpi .d{font-size:11.5px;font-weight:700;margin-top:3px;min-height:16px;font-variant-numeric:tabular-nums}
+  .d.good{color:var(--ok)} .d.bad{color:var(--warn)} .d.flat{color:#aeb6bf}
+
+  main{display:grid;grid-template-columns:232px minmax(0,1fr) 330px;gap:14px;padding:10px 20px 20px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+  .panel > h2{font-size:12px;font-weight:700;padding:10px 13px;border-bottom:1px solid var(--line);
+              background:#fafbfc;display:flex;justify-content:space-between;align-items:center}
+  .panel > h2 span{font-weight:500;color:var(--dim);font-size:11px}
+  .pad{padding:12px 13px}
+
+  .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:6px}
+  .seg button{flex:1;border:0;background:#fff;padding:7px 0;font-size:11.5px;cursor:pointer;
+              font-family:inherit;color:var(--dim);border-right:1px solid var(--line)}
+  .seg button:last-child{border-right:0}
+  .seg button.on{background:var(--accent);color:#fff;font-weight:700}
+  .hint{font-size:10.8px;color:var(--dim);line-height:1.45}
+
+  .tool{display:block;width:100%;text-align:left;border:1px solid var(--line);background:#fff;
+        border-radius:6px;padding:9px 11px;margin-bottom:6px;cursor:pointer;font-family:inherit;font-size:12px}
+  .tool:hover{border-color:#9fb6cc;background:#f7fafd}
+  .tool.on{border-color:var(--accent);background:#eaf3fb;box-shadow:inset 0 0 0 1px var(--accent)}
+  .tool b{display:block;font-size:12.5px;margin-bottom:2px}
+  .tool i{font-style:normal;font-size:10.8px;color:var(--dim)}
+
+  .btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:7px 10px;
+       cursor:pointer;font-family:inherit;font-size:11.5px}
+  .btn:hover{background:#f2f5f8}
+  .btn.pri{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:700}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .row{display:flex;gap:6px}
+  .row .btn{flex:1}
+
+  #placed{list-style:none;font-size:11.5px;max-height:150px;overflow:auto}
+  #placed li{display:flex;justify-content:space-between;gap:6px;padding:5px 0;border-bottom:1px dashed var(--line)}
+  #placed li:last-child{border-bottom:0}
+  #placed .k{color:var(--dim);font-variant-numeric:tabular-nums}
+
+  .maprap{padding:12px}
+  svg{display:block;width:100%;height:auto;background:#eaeef2;border-radius:6px}
+  .cell{cursor:pointer;stroke:#fff;stroke-width:.6}
+  .cell:hover{stroke:#12293f;stroke-width:1.8}
+  .cell.sel{stroke:#12293f;stroke-width:2.4}
+  .cell.dim{opacity:.28}
+  .cell.hl{stroke:#111;stroke-width:2}
+  .simon .cell{cursor:crosshair}
+  .fac{pointer-events:none}
+
+  .legend{display:flex;align-items:center;gap:3px;margin-top:10px;flex-wrap:wrap;font-size:10.8px;color:var(--dim)}
+  .legend .sw{width:26px;height:12px;border-radius:2px}
+
+  .tabs{display:flex;border-bottom:1px solid var(--line);background:#fafbfc}
+  .tabs button{flex:1;border:0;background:transparent;padding:9px 4px;font-size:11.5px;
+               cursor:pointer;font-family:inherit;color:var(--dim);border-bottom:2px solid transparent}
+  .tabs button.on{color:var(--accent);font-weight:700;border-bottom-color:var(--accent);background:#fff}
+  .tabpane{display:none;max-height:520px;overflow:auto}
+  .tabpane.on{display:block}
+
+  .card{border-bottom:1px solid var(--line);padding:10px 13px;cursor:pointer}
+  .card:hover{background:#f7fafd}
+  .card.on{background:#eaf3fb;box-shadow:inset 3px 0 0 var(--accent)}
+  .card .h{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:5px}
+  .card .n{font-weight:700;font-size:12.5px}
+  .card .rk{font-size:10.5px;color:#fff;background:#8494a3;border-radius:10px;padding:1px 7px;font-weight:700}
+  .card .rk.t3{background:var(--warn)}
+  .card .m{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:11px;color:var(--dim)}
+  .card .m b{color:var(--ink);font-variant-numeric:tabular-nums}
+
+  table{width:100%;border-collapse:collapse;font-size:11.5px}
+  th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums}
+  th{background:#fafbfc;color:var(--dim);font-weight:600;text-align:right;position:sticky;top:0}
+  th:first-child,td:first-child{text-align:left}
+  .bar{display:inline-block;height:7px;border-radius:3px;vertical-align:middle}
+
+  dl{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:12px;padding:12px 13px}
+  dt{color:var(--dim)}
+  dd{text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+  .empty{padding:26px 16px;text-align:center;color:var(--dim);font-size:11.5px}
+
+  #tip{position:fixed;pointer-events:none;background:#12293f;color:#fff;padding:7px 9px;
+       border-radius:5px;font-size:11px;line-height:1.5;opacity:0;transition:opacity .1s;z-index:99;
+       font-variant-numeric:tabular-nums;white-space:nowrap}
+
+  footer{padding:0 20px 26px;color:var(--dim);font-size:11px}
+  footer .fbox{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px}
+  #chk{margin-top:8px;font-size:11px;white-space:pre-line;font-family:Consolas,monospace}
+
+  @media(max-width:1200px){main{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>화성시 대중교통 수요·공급 미스매칭 분석</h1>
+  <span class="sub">과제 23번 · 교통분야 · 화면 초안 v0.1</span>
+  <span class="tag">목업 데이터</span>
+  <span class="tag ghost">실제 행정경계 아님</span>
+</header>
+
+<div class="notice">
+  <b>이 화면은 방향 합의용 초안입니다.</b>
+  격자·인구·정류장 수치는 화성시의 지역 구조(동탄 신도시 ↔ 서부 면지역)를 반영해 생성한 <b>가상 데이터</b>이며,
+  실제 값이 아닙니다. 확인할 것 → ① 레이어 3종이 필요한가 ② 격자 상세 항목이 맞는가 ③ 배치 3종 단위가 적절한가 ④ Top 10 지표가 의사결정에 충분한가
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="l">사각지대 격자 <span id="thlabel"></span></div>
+    <div class="v" id="k1">–</div><div class="d flat" id="k1d">기준선</div></div>
+  <div class="kpi"><div class="l">사각지대 영향 인구</div>
+    <div class="v" id="k2">–</div><div class="d flat" id="k2d">기준선</div></div>
+  <div class="kpi"><div class="l">그중 고령 인구</div>
+    <div class="v" id="k3">–</div><div class="d flat" id="k3d">기준선</div></div>
+  <div class="kpi"><div class="l">평균 정류장 접근거리 <span>(인구가중)</span></div>
+    <div class="v" id="k4">–</div><div class="d flat" id="k4d">기준선</div></div>
+</div>
+
+<main>
+  <!-- 좌측 -->
+  <div>
+    <div class="panel" style="margin-bottom:14px">
+      <h2>지도 레이어</h2>
+      <div class="pad">
+        <div class="seg" id="layers">
+          <button data-l="gap" class="on">갭</button>
+          <button data-l="demand">수요</button>
+          <button data-l="supply">공급</button>
+        </div>
+        <p class="hint" id="lhint"></p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>배치 시뮬레이터 <span id="simstate">꺼짐</span></h2>
+      <div class="pad">
+        <p class="hint" style="margin-bottom:9px">배치 수단을 고르고 지도를 클릭하세요. KPI가 즉시 재계산됩니다.</p>
+        <button class="tool" data-t="stop"><b>정류장 신설</b><i>해당 격자 접근거리 ↓, 인접 격자까지 파급</i></button>
+        <button class="tool" data-t="drt"><b>똑버스(DRT) 배치</b><i>반경 2격자에 얕고 넓게 — 문전 접근성 개선</i></button>
+        <button class="tool" data-t="freq"><b>배차 증편</b><i>기존 정류장이 있는 격자만 가능</i></button>
+        <div class="row" style="margin-top:9px">
+          <button class="btn" id="undo" disabled>되돌리기</button>
+          <button class="btn" id="reset" disabled>전체 초기화</button>
+        </div>
+      </div>
+      <h2 style="border-top:1px solid var(--line)">배치 목록 <span id="pcount">0건</span></h2>
+      <div class="pad"><ul id="placed"><li class="k" style="border:0">아직 배치 없음</li></ul></div>
+    </div>
+  </div>
+
+  <!-- 지도 -->
+  <div class="panel">
+    <h2>격자 지도 <span id="maplabel"></span></h2>
+    <div class="maprap">
+      <svg id="map" viewBox="0 0 720 480" role="img" aria-label="화성시 격자 지도"></svg>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <!-- 우측 -->
+  <div class="panel">
+    <div class="tabs" id="tabs">
+      <button data-p="top" class="on">사각지대 군집</button>
+      <button data-p="cell">격자 상세</button>
+      <button data-p="reg">권역 요약</button>
+    </div>
+    <div class="tabpane on" id="p-top"></div>
+    <div class="tabpane" id="p-cell"><div class="empty">지도에서 격자를 클릭하세요.</div></div>
+    <div class="tabpane" id="p-reg"></div>
+  </div>
+</main>
+
+<footer>
+  <div class="fbox">
+    <b>실제 구현 시 데이터 출처</b> — 경기데이터드림(정류소별 승하차 인원 집계, 버스정류소 현황) ·
+    공공데이터포털(TAGO 버스노선/정류소정보, 경기도 정류소간 버스 이용객수, 화성시 마을버스노선현황, 화성시 인구·공동주택 현황) ·
+    통계청 SGIS(500m 격자 인구). 통신사 유동인구는 유료·협약 대상이라 공공 격자 인구로 대체.
+    <div style="margin-top:9px"><button class="btn" id="selfcheck">모델 자체 점검 실행</button></div>
+    <div id="chk"></div>
+  </div>
+</footer>
+
+<div id="tip"></div>
+
+<script>
+"use strict";
+/* ============================================================
+   1. 목업 데이터 생성 — 시드 고정이라 열 때마다 동일
+   ============================================================ */
+const COLS=24, ROWS=16, CS=30;
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd=mulberry32(20260805), rr=(a,b)=>a+rnd()*(b-a);
+
+// 화성시 지역 구조를 모사한 권역. rect=[x0,y0,x1,y1], sup=공급 기저
+const REGIONS=[
+ {id:'dongtan',   name:'동탄권',      rect:[18,1,22,5], pop:[9000,15000],eld:[.06,.11],sup:[6.5,9.0]},
+ {id:'byeongjeom',name:'병점·진안권', rect:[15,4,18,7], pop:[6000,11000],eld:[.10,.16],sup:[5.0,7.5]},
+ {id:'maesong',   name:'매송·비봉권', rect:[12,1,16,4], pop:[1200,3500], eld:[.16,.24],sup:[2.0,3.8]},
+ {id:'bongdam',   name:'봉담·정남권', rect:[11,5,15,9], pop:[3500,8000], eld:[.12,.19],sup:[3.5,5.5]},
+ {id:'namyang',   name:'남양·마도권', rect:[5,3,9,7],   pop:[1500,4500], eld:[.18,.28],sup:[1.6,3.2]},
+ {id:'seosin',    name:'서신·송산권', rect:[2,1,6,4],   pop:[600,2200],  eld:[.24,.36],sup:[0.6,1.8]},
+ {id:'hyangnam',  name:'향남권',      rect:[9,9,13,12], pop:[4000,9000], eld:[.11,.18],sup:[3.2,5.0]},
+ {id:'ujeong',    name:'우정·장안권', rect:[3,10,8,14], pop:[500,2000],  eld:[.26,.40],sup:[0.4,1.5]},
+ {id:'yanggam',   name:'양감·팔탄권', rect:[8,12,12,14],pop:[700,2400],  eld:[.22,.34],sup:[0.9,2.2]},
+];
+
+const grid=new Map();
+for(const reg of REGIONS){
+  const [x0,y0,x1,y1]=reg.rect;
+  for(let x=x0;x<=x1;x++)for(let y=y0;y<=y1;y++){
+    const k=x+','+y; if(grid.has(k))continue;
+    const edge=(x===x0||x===x1||y===y0||y===y1);
+    if(edge&&rnd()<0.22)continue;              // 경계를 깨서 사각형 티를 없앤다
+    const pop=Math.round(rr(reg.pop[0],reg.pop[1]));
+    const eld=rr(reg.eld[0],reg.eld[1]);
+    const s=rr(reg.sup[0],reg.sup[1]);
+    grid.set(k,{id:k,x,y,reg:reg.id,regName:reg.name,pop,eld,
+      elderPop:Math.round(pop*eld),
+      commute:Math.round(pop*rr(.28,.52)),
+      stops:Math.max(0,Math.round(s*rr(.6,1.4))),
+      routes:Math.max(0,Math.round(s*.9*rr(.5,1.5))),
+      headway:Math.round(Math.min(240,Math.max(7,160/(s+.5)+rr(-6,6)))),
+      dist:Math.round(Math.min(2500,Math.max(90,1400-s*140+rr(-160,160)))),
+    });
+  }
+}
+const cells=[...grid.values()];
+for(const c of cells) c.base={stops:c.stops,routes:c.routes,headway:c.headway,dist:c.dist};
+
+/* ============================================================
+   2. 모델 — 수요/공급/갭
+   z 기준통계는 기준선에서 한 번만 계산해 고정한다.
+   그래야 시뮬레이션 전후 KPI가 같은 자로 비교된다.
+   ============================================================ */
+const L=v=>Math.log(v+1);
+function feats(c){return {lpop:L(c.pop),eld:c.eld,lcom:L(c.commute),
+                          stops:c.stops,routes:c.routes,lhead:L(c.headway),ldist:L(c.dist)}}
+const FIELDS=['lpop','eld','lcom','stops','routes','lhead','ldist'];
+const ST={};
+{ const f0=cells.map(feats);
+  for(const f of FIELDS){
+    const v=f0.map(o=>o[f]), m=v.reduce((a,b)=>a+b,0)/v.length;
+    ST[f]={m,s:Math.sqrt(v.reduce((a,b)=>a+(b-m)**2,0)/v.length)||1};
+  } }
+const z=(f,v)=>(v-ST[f].m)/ST[f].s;
+const GAP_TH=62;
+
+function recompute(){
+  for(const c of cells){
+    const f=feats(c);
+    // 수요: 인구 규모(로그) + 고령비율(교통 의존도) + 통근통행
+    c.D=.40*z('lpop',f.lpop)+.35*z('eld',f.eld)+.25*z('lcom',f.lcom);
+    // 공급: 정류장 수 + 노선 수 + 배차(짧을수록 ↑) + 접근거리(가까울수록 ↑)
+    c.S=.30*z('stops',f.stops)+.20*z('routes',f.routes)+.30*(-z('lhead',f.lhead))+.20*(-z('ldist',f.ldist));
+    c.gap=c.D-c.S;
+    c.gi=Math.max(0,Math.min(100,50+18*c.gap));
+    c.dead=c.gi>=GAP_TH;
+  }
+  buildClusters();
+}
+
+/* 군집화 — 사각지대 격자를 4방향 인접으로 묶고 3격자 미만은 노이즈로 버린다 (DBSCAN 대용).
+   같은 권역 안에서만 확장한다: 순수 인접만 쓰면 서부 전체가 한 덩어리로 붙어
+   "우선순위 랭킹"이 성립하지 않는다. 노선 개편도 읍면동 단위로 논의되므로 실무적으로도 맞다. */
+const DIRS=[[1,0],[-1,0],[0,1],[0,-1]], MAXN=8, MINN=2;
+let clusters=[];
+function buildClusters(){
+  const seen=new Set(); clusters=[];
+  // 갭이 가장 높은 격자를 시드로 삼아 갭 높은 이웃부터 흡수한다.
+  // ponytail: 후보 탐색이 군집당 O(n²)이지만 사각지대 격자가 수십 개라 무시 가능.
+  //           실제 데이터(수천 격자)로 가면 DBSCAN + 인접행렬로 교체.
+  for(const s of cells.filter(c=>c.dead).sort((a,b)=>b.gi-a.gi)){
+    if(seen.has(s.id))continue;
+    seen.add(s.id);
+    const mem=[s];
+    while(mem.length<MAXN){                       // 한 번에 손댈 수 있는 크기로 자른다
+      let best=null;
+      for(const n of mem)for(const [dx,dy] of DIRS){
+        const nb=grid.get((n.x+dx)+','+(n.y+dy));
+        if(nb&&nb.dead&&nb.reg===n.reg&&!seen.has(nb.id)&&(!best||nb.gi>best.gi))best=nb;
+      }
+      if(!best)break;
+      seen.add(best.id); mem.push(best);
+    }
+    if(mem.length<MINN)continue;                  // 산발 격자 제거
+    const pop=mem.reduce((a,m)=>a+m.pop,0);
+    const eldp=mem.reduce((a,m)=>a+m.elderPop,0);
+    const avgGi=mem.reduce((a,m)=>a+m.gi,0)/mem.length;
+    const avgDist=Math.round(mem.reduce((a,m)=>a+m.dist*m.pop,0)/pop);
+    const avgHead=Math.round(mem.reduce((a,m)=>a+m.headway*m.pop,0)/pop);
+    clusters.push({mem,ids:new Set(mem.map(m=>m.id)),name:s.regName,pop,eldp,avgGi,avgDist,avgHead,
+      // 우선순위 = 편익 규모(인구) × 결핍 강도(갭) × 고령 가중
+      score:pop*(avgGi/100)*(1+eldp/pop)});
+  }
+  clusters.sort((a,b)=>b.score-a.score);
+  // 한 권역이 여러 군집으로 쪼개졌으면 번호를 붙여 구분한다
+  const cnt={},idx={};
+  clusters.forEach(c=>cnt[c.name]=(cnt[c.name]||0)+1);
+  clusters.forEach(c=>{ if(cnt[c.name]>1){ idx[c.name]=(idx[c.name]||0)+1;
+    c.name+=' '+'ⅠⅡⅢⅣⅤⅥⅦⅧ'[idx[c.name]-1]; } });
+  clusters.forEach((c,i)=>c.rank=i+1);
+  clusters=clusters.slice(0,10);
+}
+
+/* KPI */
+function kpis(){
+  const d=cells.filter(c=>c.dead);
+  const totPop=cells.reduce((a,c)=>a+c.pop,0);
+  return {n:d.length, pop:d.reduce((a,c)=>a+c.pop,0), eld:d.reduce((a,c)=>a+c.elderPop,0),
+          dist:Math.round(cells.reduce((a,c)=>a+c.dist*c.pop,0)/totPop),
+          mass:cells.reduce((a,c)=>a+Math.max(0,c.gi-50)*c.pop,0)};
+}
+
+/* ============================================================
+   3. 시뮬레이션
+   ============================================================ */
+const EFFECT={
+  stop:{label:'정류장 신설',icon:'●',
+    apply(c,t){ // t = 체비셰프 거리
+      if(t===0){c.stops+=2;c.routes+=1;c.headway=Math.max(7,Math.round(c.headway*.8));c.dist=Math.min(c.dist,180);}
+      else if(t===1){c.stops+=1;c.dist=Math.min(c.dist,650);}
+    },radius:1},
+  drt:{label:'똑버스 배치',icon:'◆',
+    apply(c,t){ // 문전 서비스 — 넓고 얕게, 유효 접근거리를 낮춘다
+      const k=[.30,.20,.12][t]; if(!k)return;
+      c.dist=Math.round(c.dist*(1-k));
+      c.headway=Math.max(7,Math.round(c.headway*(1-k*.55)));
+      if(t===0)c.stops+=1;
+    },radius:2},
+  freq:{label:'배차 증편',icon:'▲',
+    apply(c,t){ if(t===0){c.headway=Math.max(7,Math.round(c.headway*.6));c.routes+=1;} },radius:0,
+    guard:c=>c.base.stops>0||c.stops>0}
+};
+let placements=[], tool=null, baseline=null, selected=null, activeCluster=null, layer='gap';
+
+function applyAll(){
+  for(const c of cells) Object.assign(c,{stops:c.base.stops,routes:c.base.routes,headway:c.base.headway,dist:c.base.dist});
+  for(const p of placements){
+    const e=EFFECT[p.type];
+    for(const c of cells){
+      const t=Math.max(Math.abs(c.x-p.x),Math.abs(c.y-p.y));
+      if(t<=e.radius) e.apply(c,t);
+    }
+  }
+  recompute();
+}
+
+/* ============================================================
+   4. 색상
+   ============================================================ */
+const SCALES={
+  gap:{stops:[[35,'#2166ac'],[45,'#7fabd3'],[55,'#dce7f0'],[GAP_TH,'#f7c9ae'],[72,'#e0705a'],[101,'#a3172a']],
+       labels:['공급 충분','','균형','','부족','심각']},
+  demand:{stops:[[-1.0,'#f2f0f7'],[-.4,'#cbc9e2'],[.1,'#9e9ac8'],[.6,'#756bb1'],[9,'#4a1486']],
+       labels:['낮음','','','','높음']},
+  supply:{stops:[[-1.0,'#f7fcf5'],[-.4,'#c7e9c0'],[.1,'#74c476'],[.6,'#31a354'],[9,'#00602a']],
+       labels:['빈약','','','','충실']}
+};
+function colorOf(c){
+  const v = layer==='gap'?c.gi : layer==='demand'?c.D : c.S;
+  for(const [th,col] of SCALES[layer].stops) if(v<th) return col;
+  return SCALES[layer].stops.at(-1)[1];
+}
+
+/* ============================================================
+   5. 렌더링
+   ============================================================ */
+const $=s=>document.querySelector(s), fmt=n=>n.toLocaleString('ko-KR');
+const svg=$('#map'), tip=$('#tip');
+
+function renderMap(){
+  const parts=[];
+  for(const c of cells){
+    const cls=['cell'];
+    if(selected===c)cls.push('sel');
+    if(activeCluster){ activeCluster.ids.has(c.id)?cls.push('hl'):cls.push('dim'); }
+    parts.push(`<rect class="${cls.join(' ')}" data-id="${c.id}" x="${c.x*CS}" y="${c.y*CS}" `
+      +`width="${CS-1}" height="${CS-1}" rx="2" fill="${colorOf(c)}"></rect>`);
+  }
+  for(const p of placements){
+    parts.push(`<text class="fac" x="${p.x*CS+(CS-1)/2}" y="${p.y*CS+(CS-1)/2+5}" `
+      +`text-anchor="middle" font-size="15" fill="#12293f" stroke="#fff" stroke-width="2.5" `
+      +`paint-order="stroke">${EFFECT[p.type].icon}</text>`);
+  }
+  svg.innerHTML=parts.join('');
+  $('#maplabel').textContent=`${cells.length}개 격자 · 시연용 2km 격자 (실제 구현 500m)`;
+  renderLegend();
+}
+
+function renderLegend(){
+  const sc=SCALES[layer];
+  const title={gap:'갭 지수 (수요 − 공급)',demand:'수요 점수',supply:'공급 점수'}[layer];
+  $('#legend').innerHTML=`<span style="margin-right:4px">${title}</span>`+
+    sc.stops.map((s,i)=>`<span class="sw" style="background:${s[1]}"></span>`
+      +(sc.labels[i]?`<span style="margin:0 7px 0 2px">${sc.labels[i]}</span>`:'')).join('')
+    +(layer==='gap'?`<span style="margin-left:8px">· 사각지대 판정 ≥ ${GAP_TH}</span>`:'');
+  $('#lhint').textContent={
+    gap:'수요 대비 공급이 얼마나 모자란지. 빨간 격자가 개선 대상입니다.',
+    demand:'인구 규모(로그) + 고령비율 + 통근통행. 고령비율을 넣는 이유는 자가용 접근성이 낮아 대중교통 의존도가 구조적으로 높기 때문입니다.',
+    supply:'정류장 수 + 경유 노선 수 + 배차간격 + 최근접 정류장 거리.'
+  }[layer];
+}
+
+let prevK=null;
+function renderKpi(){
+  const k=kpis();
+  const set=(id,val,delta,unit,invert)=>{
+    $('#'+id).innerHTML=val+(unit?`<small>${unit}</small>`:'');
+    const el=$('#'+id+'d');
+    if(delta===null||!placements.length){el.className='d flat';el.textContent='기준선';return;}
+    if(Math.abs(delta)<1e-9){el.className='d flat';el.textContent='변화 없음';return;}
+    const good=invert?delta>0:delta<0;
+    el.className='d '+(good?'good':'bad');
+    el.textContent=(delta>0?'▲ +':'▼ ')+fmt(Math.abs(Math.round(delta))*(delta>0?1:-1)).replace('-','')+' (기준선 대비)';
+  };
+  const b=baseline;
+  set('k1',fmt(k.n),b?k.n-b.n:null,'격자');
+  set('k2',fmt(k.pop),b?k.pop-b.pop:null,'명');
+  set('k3',fmt(k.eld),b?k.eld-b.eld:null,'명');
+  set('k4',fmt(k.dist),b?k.dist-b.dist:null,'m');
+  prevK=k;
+}
+
+function renderTop(){
+  const el=$('#p-top');
+  if(!clusters.length){el.innerHTML='<div class="empty">사각지대 군집이 없습니다.<br>배치를 되돌리면 다시 나타납니다.</div>';return;}
+  el.innerHTML=clusters.map(c=>`
+    <div class="card ${activeCluster===c?'on':''}" data-rank="${c.rank}">
+      <div class="h"><span class="n">${c.name} 일대</span>
+        <span class="rk ${c.rank<=3?'t3':''}">우선순위 ${c.rank}</span></div>
+      <div class="m">
+        <span>영향 인구 <b>${fmt(c.pop)}명</b></span>
+        <span>고령 인구 <b>${fmt(c.eldp)}명</b></span>
+        <span>격자 수 <b>${c.mem.length}개</b></span>
+        <span>평균 갭지수 <b>${c.avgGi.toFixed(1)}</b></span>
+        <span>평균 접근거리 <b>${fmt(c.avgDist)}m</b></span>
+        <span>평균 배차 <b>${c.avgHead}분</b></span>
+      </div>
+    </div>`).join('');
+}
+
+function renderCell(){
+  const el=$('#p-cell');
+  if(!selected){el.innerHTML='<div class="empty">지도에서 격자를 클릭하세요.</div>';return;}
+  const c=selected, b=c.base;
+  const chg=(now,was,unit,lower)=>{
+    if(now===was)return `${fmt(now)}${unit}`;
+    const good=lower?now<was:now>was;
+    return `${fmt(now)}${unit} <span style="color:${good?'var(--ok)':'var(--warn)'};font-size:11px">
+            (기준 ${fmt(was)}${unit})</span>`;
+  };
+  el.innerHTML=`
+    <dl>
+      <dt>격자 ID</dt><dd>HS-${c.x}-${c.y}</dd>
+      <dt>권역</dt><dd>${c.regName}</dd>
+      <dt>인구</dt><dd>${fmt(c.pop)}명</dd>
+      <dt>고령 인구 (비율)</dt><dd>${fmt(c.elderPop)}명 (${(c.eld*100).toFixed(1)}%)</dd>
+      <dt>통근 통행</dt><dd>${fmt(c.commute)}회</dd>
+      <dt style="border-top:1px solid var(--line);padding-top:6px">정류장 수</dt>
+        <dd style="border-top:1px solid var(--line);padding-top:6px">${chg(c.stops,b.stops,'개',false)}</dd>
+      <dt>경유 노선</dt><dd>${chg(c.routes,b.routes,'개',false)}</dd>
+      <dt>평균 배차간격</dt><dd>${chg(c.headway,b.headway,'분',true)}</dd>
+      <dt>최근접 정류장</dt><dd>${chg(c.dist,b.dist,'m',true)}</dd>
+      <dt style="border-top:1px solid var(--line);padding-top:6px">수요 점수 D</dt>
+        <dd style="border-top:1px solid var(--line);padding-top:6px">${c.D.toFixed(2)}</dd>
+      <dt>공급 점수 S</dt><dd>${c.S.toFixed(2)}</dd>
+      <dt><b>갭 지수</b></dt>
+      <dd><b style="color:${c.dead?'var(--warn)':'var(--ink)'}">${c.gi.toFixed(1)}</b>
+          ${c.dead?' <span style="color:var(--warn);font-size:11px">사각지대</span>':''}</dd>
+    </dl>`;
+}
+
+function renderReg(){
+  const by={};
+  for(const c of cells)(by[c.regName] ||= []).push(c);
+  const rows=Object.entries(by).map(([n,cs])=>({
+    n, cnt:cs.length, pop:cs.reduce((a,c)=>a+c.pop,0),
+    gi:cs.reduce((a,c)=>a+c.gi,0)/cs.length,
+    dead:cs.filter(c=>c.dead).length
+  })).sort((a,b)=>b.gi-a.gi);
+  $('#p-reg').innerHTML=`<table>
+    <thead><tr><th>권역</th><th>격자</th><th>인구</th><th>평균 갭</th><th>사각지대</th></tr></thead>
+    <tbody>${rows.map(r=>`<tr>
+      <td>${r.n}</td><td>${r.cnt}</td><td>${fmt(r.pop)}</td>
+      <td><span class="bar" style="width:${Math.max(3,r.gi*.42)}px;background:${
+        r.gi>=GAP_TH?'#a3172a':r.gi>=55?'#e0705a':'#7fabd3'}"></span> ${r.gi.toFixed(1)}</td>
+      <td style="color:${r.dead?'var(--warn)':'var(--dim)'}">${r.dead}</td></tr>`).join('')}</tbody></table>`;
+}
+
+function renderPlaced(){
+  const ul=$('#placed');
+  $('#pcount').textContent=placements.length+'건';
+  $('#undo').disabled=$('#reset').disabled=!placements.length;
+  ul.innerHTML=placements.length
+    ? placements.map((p,i)=>`<li><span>${EFFECT[p.type].icon} ${EFFECT[p.type].label}</span>
+        <span class="k">HS-${p.x}-${p.y}</span></li>`).join('')
+    : '<li class="k" style="border:0">아직 배치 없음</li>';
+}
+
+function renderAll(){renderMap();renderKpi();renderTop();renderCell();renderReg();renderPlaced();}
+
+/* ============================================================
+   6. 인터랙션
+   ============================================================ */
+$('#layers').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  layer=b.dataset.l;
+  [...e.currentTarget.children].forEach(x=>x.classList.toggle('on',x===b));
+  renderMap();
+});
+
+document.querySelectorAll('.tool').forEach(btn=>btn.addEventListener('click',()=>{
+  const t=btn.dataset.t;
+  tool = tool===t ? null : t;
+  document.querySelectorAll('.tool').forEach(b=>b.classList.toggle('on',b.dataset.t===tool));
+  document.body.classList.toggle('simon',!!tool);
+  $('#simstate').textContent = tool ? EFFECT[tool].label+' 모드 — 지도 클릭' : '꺼짐';
+}));
+
+svg.addEventListener('click',e=>{
+  const r=e.target.closest('rect'); if(!r)return;
+  const c=grid.get(r.dataset.id);
+  if(tool){
+    const e2=EFFECT[tool];
+    if(e2.guard&&!e2.guard(c)){alert('배차 증편은 기존 정류장이 있는 격자에만 적용할 수 있습니다.');return;}
+    placements.push({type:tool,x:c.x,y:c.y});
+    applyAll(); activeCluster=null; renderAll();
+  }else{
+    selected=c; activeCluster=null;
+    switchTab('cell'); renderMap(); renderCell(); renderTop();
+  }
+});
+
+svg.addEventListener('mousemove',e=>{
+  const r=e.target.closest('rect');
+  if(!r){tip.style.opacity=0;return;}
+  const c=grid.get(r.dataset.id);
+  tip.innerHTML=`<b>${c.regName}</b> HS-${c.x}-${c.y}<br>`
+    +`인구 ${fmt(c.pop)}명 · 고령 ${(c.eld*100).toFixed(0)}%<br>`
+    +`정류장 ${c.dist}m · 배차 ${c.headway}분<br>`
+    +`갭 지수 <b>${c.gi.toFixed(1)}</b>${c.dead?' ⚠ 사각지대':''}`;
+  tip.style.opacity=1;
+  tip.style.left=Math.min(e.clientX+14,innerWidth-190)+'px';
+  tip.style.top=(e.clientY+14)+'px';
+});
+svg.addEventListener('mouseleave',()=>tip.style.opacity=0);
+
+$('#p-top').addEventListener('click',e=>{
+  const card=e.target.closest('.card'); if(!card)return;
+  const c=clusters.find(x=>x.rank===+card.dataset.rank);
+  activeCluster = activeCluster===c ? null : c;
+  renderMap(); renderTop();
+});
+
+$('#tabs').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(b)switchTab(b.dataset.p);
+});
+function switchTab(p){
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.p===p));
+  document.querySelectorAll('.tabpane').forEach(x=>x.classList.toggle('on',x.id==='p-'+p));
+}
+
+$('#undo').addEventListener('click',()=>{placements.pop();applyAll();activeCluster=null;renderAll();});
+$('#reset').addEventListener('click',()=>{placements=[];applyAll();activeCluster=null;renderAll();});
+
+/* ============================================================
+   7. 자체 점검 — 모델이 깨지면 여기서 잡힌다
+   ============================================================ */
+$('#selfcheck').addEventListener('click',()=>{
+  const log=[], ok=(cond,msg)=>log.push((cond?'  PASS  ':'  FAIL  ')+msg);
+  const saved=placements.slice();
+  placements=[]; applyAll();
+  const b=kpis();
+
+  ok(cells.length>100, `격자 생성: ${cells.length}개`);
+  ok(cells.every(c=>c.gi>=0&&c.gi<=100), '갭 지수가 모두 0~100 범위');
+  ok(cells.every(c=>c.regName), '모든 격자에 권역 할당됨');
+  ok(b.n>0&&b.n<cells.length, `기준선 사각지대 ${b.n}격자 (전부도 전무도 아님)`);
+  ok(clusters.length>=3&&clusters.length<=10, `군집 ${clusters.length}개 (랭킹이 성립하는 3개 이상, 상위 10 제한)`);
+  ok(clusters.every(c=>new Set(c.mem.map(m=>m.reg)).size===1), '각 군집이 단일 권역으로 구성됨');
+  ok(clusters.every(c=>c.mem.length>=MINN&&c.mem.length<=MAXN), `군집 크기가 ${MINN}~${MAXN}격자 (실행 단위)`);
+  ok(new Set(clusters.map(c=>c.name)).size===clusters.length, '군집 이름 중복 없음');
+
+  // 화성시 구조 재현: 서부 면지역 갭 > 동탄 갭
+  const avg=id=>{const s=cells.filter(c=>c.reg===id);return s.reduce((a,c)=>a+c.gi,0)/s.length};
+  ok(avg('ujeong')>avg('dongtan')+15, `우정·장안(${avg('ujeong').toFixed(1)}) > 동탄(${avg('dongtan').toFixed(1)})`);
+  ok(avg('seosin')>avg('byeongjeom'), `서신·송산(${avg('seosin').toFixed(1)}) > 병점·진안(${avg('byeongjeom').toFixed(1)})`);
+
+  // 최악 격자에 정류장을 놓으면 갭 총량이 반드시 줄어야 한다
+  const worst=[...cells].sort((a,b)=>b.gi-a.gi)[0];
+  placements=[{type:'stop',x:worst.x,y:worst.y}]; applyAll();
+  const a1=kpis();
+  ok(a1.mass<b.mass, `정류장 신설 → 갭 총량 ${Math.round(b.mass).toLocaleString()} → ${Math.round(a1.mass).toLocaleString()} 감소`);
+  ok(a1.dist<=b.dist, `평균 접근거리 ${b.dist}m → ${a1.dist}m`);
+
+  // 되돌리면 기준선으로 정확히 복원돼야 한다
+  placements=[]; applyAll();
+  const r=kpis();
+  ok(r.n===b.n&&r.pop===b.pop&&r.dist===b.dist&&Math.abs(r.mass-b.mass)<1e-6, '되돌리기 후 기준선 완전 복원');
+
+  placements=saved; applyAll(); activeCluster=null; renderAll();
+  const fail=log.filter(l=>l.startsWith('  FAIL')).length;
+  $('#chk').innerHTML=`<b style="color:${fail?'var(--warn)':'var(--ok)'}">`
+    +`${fail?`${fail}건 실패`:'전체 통과'} (${log.length}개 항목)</b>\n`
+    +log.join('\n').replace(/PASS/g,'✔').replace(/FAIL/g,'✘');
+});
+
+/* 부팅 */
+$('#thlabel').textContent=`(갭 ≥ ${GAP_TH})`;
+applyAll();
+baseline=kpis();
+renderAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# 인증키 — 절대 커밋 금지
+.env
+.env.local
+
+# 전국 원본 (372MB). 화성시 추출본은 dataset_hwaseong/ 에 커밋됨.
+# 재생성: python analysis/00_extract_hwaseong.py
+dataset/
+data/raw/
+data/interim/
+*.duckdb
+*.duckdb.wal
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+dist/
+
+# 에디터·OS
+.omc/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
