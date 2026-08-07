@@ -15,7 +15,7 @@
 | 1 | **[docs/BACKEND.md](docs/BACKEND.md)** | **아키텍처 · 업무 분담 · 일정.** 먼저 읽으세요 |
 | 2 | [docs/기획서.md](docs/기획서.md) | 문제 정의 · 분석 모델 수식 · 데이터 출처 |
 | 3 | [dataset_hwaseong/README.md](dataset_hwaseong/README.md) | 데이터 목록 · 원본 출처 · 알려진 제약 |
-| 4 | 프론트 `docs/API.md` | 구현할 엔드포인트 9개 명세 |
+| 4 | 프론트 `docs/API.md` | 구현할 엔드포인트 10개 명세 |
 
 ---
 
@@ -62,8 +62,8 @@ python analysis/check_api.py
 
 | | **담당 A — 데이터 파이프라인** | **담당 B — API 서버** |
 |---|---|---|
-| 결과물 | `batch_*` 테이블 | 엔드포인트 9개 |
-| 최대 난관 | `02_grid.py` 격자 공간조인 | `POST /simulations` 재계산 |
+| 결과물 | `batch_*` 테이블 | 엔드포인트 10개 |
+| 최대 난관 | `02_grid.py` 격자 공간조인 | `POST /simulations` · `/recommendations` 재계산 |
 | 도구 | pandas · DuckDB · GeoPandas | FastAPI · SQLAlchemy |
 
 **인터페이스는 DB 스키마 하나뿐입니다.** A는 `batch_*` 에 쓰고, B는 `v_*` 뷰를 읽습니다.
