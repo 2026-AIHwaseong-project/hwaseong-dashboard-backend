@@ -28,6 +28,7 @@ from shapely.ops import transform, unary_union
 from shapely.strtree import STRtree
 
 sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")   # 없으면 sys.exit 메시지가 깨져 나옵니다
 
 ROOT = Path(__file__).resolve().parent.parent
 SGIS = ROOT / "dataset" / "국가데이터처_SGIS 격자 통계 및 경계"
@@ -81,6 +82,18 @@ def read_stat(path, wanted):
                     pass
     return acc
 
+
+if not (SGIS / "2. 경계").is_dir():
+    sys.exit(
+        "\n원본 SGIS 격자 데이터가 없습니다.\n"
+        f"  찾은 경로: {SGIS}\n\n"
+        "이 스크립트는 전국 원본(279MB)이 있어야 돌아갑니다. 저장소에는 커밋돼 있지\n"
+        "않습니다(.gitignore). **이미 만들어진 결과물이 필요할 뿐이라면 받지 마세요** —\n"
+        "  dataset_hwaseong/grid_hwaseong.csv  (786격자, 커밋됨)\n"
+        "가 이 스크립트의 산출물이고 그대로 쓰면 됩니다.\n\n"
+        "격자 로직을 바꾸려고 재실행하는 경우에만 아래에서 받아 dataset/ 에 푸세요.\n"
+        "  https://www.data.go.kr/data/15141768/fileData.do\n"
+    )
 
 print("=" * 64)
 print("[1] 화성시 읍면동 경계 로드")
