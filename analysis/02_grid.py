@@ -38,13 +38,38 @@ OUT = ROOT / "dataset_hwaseong" / "grid_hwaseong.csv"
 # 경기도(시도코드 31)에 걸치는 100km 격자 블록. 코드집 adm_grid_mapping.xlsx 기준
 BLOCKS = ["다바", "다사", "다아", "라바", "라사", "라아"]
 
+# 연령 구간 — flow_hourly.csv 의 컬럼(남자0009…여자6569)과 같은 구간으로 맞춥니다.
+#
+# 왜 맞추는가: 유동인구 CSV 는 시군구 단위 하나뿐이라 모든 격자에 같은 시간배율이
+# 곱해집니다. 그런데 z-score 는 공통 배수에 불변이라(z(c·D) = z(D)) 시간대를 바꿔도
+# 수요 z 가 전혀 안 바뀝니다. 시간대 탭이 죽는 겁니다.
+#
+# 연령별로 곱하면 살아납니다. 격자마다 연령 구성이 다르므로
+#     D_t(i) = Σ_연령 [ 격자 i 의 해당 연령 인구 × 그 연령의 t 시간대 유동 비율 ]
+# 고령이 많은 격자는 낮에 완만하고 청년이 많은 격자는 출퇴근에 뾰족해집니다.
+# 그래서 여기서 연령대를 합치지 않고 그대로 남깁니다. (03_join.py 에서 사용)
+AGE_BANDS = {
+    "a0009": ["in_age_001", "in_age_002"],   # 유동인구는 0~9 를 한 칸으로 줍니다
+    "a1014": ["in_age_003"],
+    "a1519": ["in_age_004"],
+    "a2024": ["in_age_005"],
+    "a2529": ["in_age_006"],
+    "a3034": ["in_age_007"],
+    "a3539": ["in_age_008"],
+    "a4044": ["in_age_009"],
+    "a4549": ["in_age_010"],
+    "a5054": ["in_age_011"],
+    "a5559": ["in_age_012"],
+    "a6064": ["in_age_013"],
+    "a6569": ["in_age_014"],
+    # ⚠️ 유동인구 CSV 는 65~69 가 마지막입니다. 70 세 이상 대응 컬럼이 없습니다.
+    #    03_join.py 에서 6569 비율을 대용으로 씁니다(그 사실을 응답에 표시).
+    "a70p": [f"in_age_{i:03d}" for i in range(15, 22)],
+}
+
 # 결합할 격자 통계. (폴더, 파일접두, {출력컬럼: [통계항목코드…]})
 STATS = [
-    ("1. 2024년 격자 통계(인구)", "인구", {
-        "pop": ["to_in_001"],                                    # 총인구
-        # 65세 이상 = 65~69 … 100세이상. 고령'비율'이 우선순위 가중에 들어갑니다(§5.6)
-        "elderly": [f"in_age_{i:03d}" for i in range(14, 22)],
-    }),
+    ("1. 2024년 격자 통계(인구)", "인구", {"pop": ["to_in_001"], **AGE_BANDS}),
     ("2. 2024년 격자 통계(가구)", "가구", {"households": ["to_ga_001"]}),
     ("3. 2024년 격자 통계(주택)", "주택", {"houses": ["to_ho_001"]}),
     ("4. 2024년 격자통계(사업체, 종사자)/종사자(대분류)", "종사자",
@@ -158,14 +183,20 @@ for folder, prefix, wanted in STATS:
             if gid in cells:
                 cells[gid].update(vals)
                 got += 1
-    print(f"  {prefix:6} {got:>5,}칸 결합  ({', '.join(wanted)})")
+    shown = ", ".join(list(wanted)[:3]) + (f" 외 {len(wanted) - 3}개" if len(wanted) > 3 else "")
+    print(f"  {prefix:6} {got:>5,}칸 결합  ({shown})")
 
-cols = ["grid_id", "lon", "lat", "x_5179", "y_5179",
-        "region_code", "region", "region_kind",
-        "pop", "elderly", "elderly_ratio", "households", "houses", "workers"]
+BASE = ["pop", "households", "houses", "workers"]
+cols = (["grid_id", "lon", "lat", "x_5179", "y_5179",
+         "region_code", "region", "region_kind",
+         "pop", "elderly", "elderly_ratio", "households", "houses", "workers"]
+        + list(AGE_BANDS))
 for c in cells.values():
-    for k in ("pop", "elderly", "households", "houses", "workers"):
+    for k in BASE + list(AGE_BANDS):
         c.setdefault(k, 0)                              # 통계가 없는 격자 = 실제로 0인 무인 격자
+        c[k] = round(c[k], 1)
+    # 고령(65+)은 연령대에서 파생합니다. 따로 세면 두 값이 어긋날 여지가 생깁니다.
+    c["elderly"] = round(c["a6569"] + c["a70p"], 1)
     c["elderly_ratio"] = round(c["elderly"] / c["pop"], 4) if c["pop"] else 0.0
 
 rows = sorted(cells.values(), key=lambda c: c["grid_id"])
@@ -179,6 +210,11 @@ print("[4] 검증")
 pop = sum(c["pop"] for c in rows)
 eld = sum(c["elderly"] for c in rows)
 print(f"  격자 {len(rows):,}칸 · 총인구 {pop:,.0f}명 · 고령 {eld:,.0f}명 ({eld / pop:.1%})")
+
+# 연령대 합 == 총인구 인지. 어긋나면 SGIS 코드 매핑이 틀린 것입니다.
+band_sum = sum(sum(c[b] for b in AGE_BANDS) for c in rows)
+gap = abs(band_sum - pop) / pop
+print(f"  연령대 합 {band_sum:,.0f}명 vs 총인구 {pop:,.0f}명 — 차이 {gap:.2%}")
 print(f"  총종사자 {sum(c['workers'] for c in rows):,.0f}명 · 총가구 {sum(c['households'] for c in rows):,.0f}가구")
 
 by_region = defaultdict(lambda: [0, 0.0])
@@ -195,4 +231,5 @@ for r_ in sorted(by_region.items(), key=lambda kv: -kv[1][0])[:5]:
 assert 700_000 < pop < 1_300_000, f"총인구 {pop:,.0f} — 화성시 규모(약 100만)를 벗어납니다"
 assert 600 < len(rows) < 1100, f"격자 {len(rows)}칸 — 예상(약 850칸)을 벗어납니다"
 assert len(by_region) == len(dongs), f"읍면동 {len(by_region)}/{len(dongs)}개만 격자를 받았습니다"
+assert gap < 0.02, f"연령대 합이 총인구와 {gap:.1%} 어긋납니다 — SGIS 코드 매핑 확인"
 print(f"\n  ✅ 통과 → {OUT.relative_to(ROOT)}  ({OUT.stat().st_size / 1e6:.2f} MB)")
