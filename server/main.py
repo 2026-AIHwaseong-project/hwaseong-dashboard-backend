@@ -29,6 +29,7 @@ from typing import Optional
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -81,6 +82,11 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# 프론트 폴백: fetch("/api/v1/…").catch(() => fetch("/data/grid_am.json"))
+_DATA_DIR = ROOT / "data"
+if _DATA_DIR.exists():
+    app.mount("/data", StaticFiles(directory=str(_DATA_DIR)), name="data_fallback")
 
 
 # ─── 공통 헬퍼 ──────────────────────────────────────────────────────────────────
