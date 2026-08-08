@@ -261,12 +261,23 @@ for g in grid:
     near = [(slist[i], math.dist((g["x"], g["y"]), (slist[i]["x"], slist[i]["y"])))
             for i in stree.query(sgeom.Point(g["x"], g["y"]).buffer(WALK_M))]
     near = [(s, d) for s, d in near if d <= WALK_M]
+    # 거리(커버리지용)와 ID(화면 드릴다운용)는 기준이 다르다.
+    #
+    #   nearest_stop_m  — 물리적 접근성. 정류장이 거기 있으면 ID 유무와 무관하다.
+    #   nearest_stop_id — 프론트가 /stops/{id}/profile 로 조회하는 값. ARS 가 없는
+    #                     정류장(292개, 9.2% · 대부분 승하차 0)을 가리키면 링크가 끊긴다.
+    #
+    # 그래서 거리는 전체에서, ID 는 ARS 가 있는 정류장 중에서 고른다.
     if near:
-        s_min, nearest_m = min(near, key=lambda t: t[1])
+        nearest_m = min(d for _, d in near)
     else:                                          # 도보권에 정류장이 없는 격자
-        s_min, nearest_m = min(((s, math.dist((g["x"], g["y"]), (s["x"], s["y"])))
-                                for s in slist), key=lambda t: t[1])
+        nearest_m = min(math.dist((g["x"], g["y"]), (s["x"], s["y"])) for s in slist)
     coverage = max(0.05, min(1.0, 1 - nearest_m / WALK_M))
+
+    with_ars = [(s, d) for s, d in near if s["ars"]]
+    s_min = (min(with_ars, key=lambda t: t[1])[0] if with_ars else
+             min(((s, math.dist((g["x"], g["y"]), (s["x"], s["y"]))) for s in slist if s["ars"]),
+                 key=lambda t: t[1])[0])
     rail_m = min((math.dist((g["x"], g["y"]), r) for r in rails), default=None)
 
     for pid, h0, h1 in PERIODS:
