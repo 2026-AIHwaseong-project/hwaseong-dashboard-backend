@@ -29,6 +29,8 @@
 | `stops_tago.csv` | 3,366 | 〃 | TAGO 정류소 (node_id ↔ ARS 다리) |
 | `stops_hwaseong.csv` | 3,158 | `python analysis/03_join.py` | ★ **정류장 마스터.** 일평균 승하차·노선수·시간대별 운행빈도 |
 | `grid_join.csv` | **3,144** | 〃 | ★ **격자 × 4시간대.** D·S 의 원재료 (`04_model.py` 입력) |
+| `grid_metrics.csv` | **3,144** | `python analysis/04_model.py` | ★ **최종 지표.** D·S·z·MI·4분면·우선순위·bins |
+| `norm_stats.json` | — | 〃 | ★★ **정규화 기준통계(고정).** 시뮬레이션이 반드시 참조 |
 
 `grid_hwaseong.csv` 컬럼:
 
