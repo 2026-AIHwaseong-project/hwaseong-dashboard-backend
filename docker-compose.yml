@@ -1,0 +1,32 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/meta"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s   # Poisson 회귀 로드 대기
+
+  # PostgreSQL — DB 적재(06_load.py --db)가 필요할 때만 활성화
+  # db:
+  #   image: postgis/postgis:16-3.4-alpine
+  #   environment:
+  #     POSTGRES_DB: hwaseong
+  #     POSTGRES_USER: hw
+  #     POSTGRES_PASSWORD: hw_pass
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #     - ./server/schema_ops.sql:/docker-entrypoint-initdb.d/schema.sql
+
+# volumes:
+#   pgdata:

@@ -564,8 +564,80 @@ def run_recommendations(req: RecRequest):
 
 
 # ─── 9. POST /api/v1/reports/draft ────────────────────────────────────────────
+
+# 지원 프로바이더 설정
+_PROVIDERS = {
+    "claude": {"env": "ANTHROPIC_API_KEY", "default_model": "claude-sonnet-5",   "label": "Claude (Anthropic)"},
+    "openai": {"env": "OPENAI_API_KEY",    "default_model": "gpt-4o",            "label": "GPT-4o (OpenAI)"},
+    "gemini": {"env": "GOOGLE_API_KEY",    "default_model": "gemini-2.0-flash",  "label": "Gemini (Google)"},
+}
+
+
+def _detect_provider() -> str:
+    """환경변수를 확인해 사용 가능한 첫 번째 프로바이더 반환."""
+    import os
+    for name, cfg in _PROVIDERS.items():
+        if os.environ.get(cfg["env"]):
+            return name
+    return "claude"  # 키 없으면 claude로 시도 (오류 메시지가 명확함)
+
+
+def _call_ai(provider: str, model: str, prompt: str) -> str:
+    """프로바이더별 API 호출 → 텍스트 반환."""
+    import os
+
+    if provider == "claude":
+        try:
+            import anthropic
+        except ImportError:
+            raise HTTPException(500, "pip install anthropic")
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key:
+            raise HTTPException(500, "ANTHROPIC_API_KEY 환경변수가 없습니다.")
+        client = anthropic.Anthropic(api_key=key)
+        msg = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+
+    if provider == "openai":
+        try:
+            import openai
+        except ImportError:
+            raise HTTPException(500, "pip install openai")
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise HTTPException(500, "OPENAI_API_KEY 환경변수가 없습니다.")
+        client = openai.OpenAI(api_key=key)
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.choices[0].message.content
+
+    if provider == "gemini":
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise HTTPException(500, "pip install google-generativeai")
+        key = os.environ.get("GOOGLE_API_KEY")
+        if not key:
+            raise HTTPException(500, "GOOGLE_API_KEY 환경변수가 없습니다.")
+        genai.configure(api_key=key)
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(prompt)
+        return resp.text
+
+    raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+
+
 class ReportRequest(BaseModel):
     period: str = "am"
+    provider: str = "auto"      # auto | claude | openai | gemini
+    model: Optional[str] = None  # None → 프로바이더 기본 모델
     format: str = "sections"
     tone: str = "공문"
     sections: list = ["summary", "status", "problem", "plan", "effect", "next"]
@@ -574,12 +646,13 @@ class ReportRequest(BaseModel):
 
 @app.post("/api/v1/reports/draft")
 def draft_report(req: ReportRequest):
-    try:
-        import anthropic
-    except ImportError:
-        raise HTTPException(500, "anthropic 패키지가 설치되지 않았습니다: pip install anthropic")
-
     _chk_period(req.period)
+
+    provider = _detect_provider() if req.provider == "auto" else req.provider
+    if provider not in _PROVIDERS:
+        raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+    model = req.model or _PROVIDERS[provider]["default_model"]
+
     period_name  = PERIOD_NAME[req.period]
     period_hours = PERIOD_HOURS[req.period]
     kpi          = req.context.get("kpi", {})
@@ -588,7 +661,7 @@ def draft_report(req: ReportRequest):
     rec_ctx      = req.context.get("recommendation")
 
     sim_block = ("시뮬레이션 결과:\n" + json.dumps(sim_ctx, ensure_ascii=False, indent=2)) if sim_ctx else ""
-    rec_block = ("추천 배치안:\n" + json.dumps(rec_ctx, ensure_ascii=False, indent=2)) if rec_ctx else ""
+    rec_block = ("추천 배치안:\n"      + json.dumps(rec_ctx, ensure_ascii=False, indent=2)) if rec_ctx else ""
 
     prompt = f"""화성시 버스 수요·공급 미스매칭 분석 보고서 초안을 {req.tone} 형식으로 작성해주세요.
 
@@ -614,7 +687,8 @@ def draft_report(req: ReportRequest):
   "org": "화성시", "dept": "교통정책과",
   "period": "{req.period}",
   "generatedAt": "(생성 일시)",
-  "model": "claude-sonnet-5",
+  "provider": "{_PROVIDERS[provider]['label']}",
+  "model": "{model}",
   "sections": [
     {{"key": "summary", "heading": "1. 검토 개요", "body": "본문...", "bullets": ["항목..."]}}
   ],
@@ -628,29 +702,29 @@ def draft_report(req: ReportRequest):
 
 JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 
-    client = anthropic.Anthropic()
     try:
-        msg  = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = msg.content[0].text.strip()
-        m    = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+        text = _call_ai(provider, model, prompt).strip()
+        m = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
         if m:
             text = m.group(1)
         result = json.loads(text)
         result["generatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        result["provider"]    = _PROVIDERS[provider]["label"]
+        result["model"]       = model
         return result
     except json.JSONDecodeError as e:
         return {
             "title": "보고서 생성 오류 — JSON 파싱 실패",
             "subtitle": str(e),
             "period": req.period,
+            "provider": _PROVIDERS[provider]["label"],
+            "model": model,
             "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "sections": [],
             "tables": [],
-            "disclaimer": "Claude 응답을 JSON으로 파싱하지 못했습니다.",
+            "disclaimer": "AI 응답을 JSON으로 파싱하지 못했습니다.",
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(500, f"Claude API 오류: {e}")
+        raise HTTPException(500, f"AI API 오류 ({provider}): {e}")

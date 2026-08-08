@@ -13,7 +13,11 @@ pyproj>=3.6
 fastapi>=0.111
 uvicorn[standard]>=0.29
 pydantic>=2.0
-anthropic>=0.28
+
+# AI 보고서 — 하나 이상 키를 설정하면 됩니다
+anthropic>=0.28          # ANTHROPIC_API_KEY  → claude-sonnet-5
+openai>=1.30             # OPENAI_API_KEY     → gpt-4o
+google-generativeai>=0.8 # GOOGLE_API_KEY     → gemini-2.0-flash
 
 # PostgreSQL 적재 (선택)
 # psycopg2-binary>=2.9
