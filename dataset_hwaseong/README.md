@@ -16,21 +16,31 @@
 | `routes_village.csv` | 155 | 마을버스 (배차·인가대수 포함) | [15052048](https://www.data.go.kr/data/15052048/fileData.do) |
 | `rail_stations.csv` | 5 | 철도역 (통행 유인) | [15013205](https://www.data.go.kr/data/15013205/standard.do) |
 
-**총 24.8 MB** · 인코딩 `utf-8-sig` (원본은 대부분 cp949였음)
+**원본 추출분 24.8 MB** · 인코딩 `utf-8-sig` (원본은 대부분 cp949였음)
 
 ### 파이프라인 산출물 (원본 아님)
 
 | 파일 | 행수 | 생성 | 내용 |
 |---|---|---|---|
 | `hwaseong_dong.geojson` | 29 | 프론트 `tools/build-boundary.py` | 읍면동 실경계 (4읍 9면 16동) · EPSG:4326 · 25m 단순화 |
-| `grid_hwaseong.csv` | **786** | `python analysis/02_grid.py` | ★ **격자 뼈대.** 좌표·읍면동·인구·고령·가구·주택·종사자 |
+| `grid_hwaseong.csv` | **786** | `python analysis/02_grid.py` | ★ **격자 뼈대.** 좌표·읍면동·인구·연령 14구간·가구·주택·종사자 |
+| `routes.csv` | 146 | `python analysis/01_fetch.py` | ★ **배차간격(공급 S 의 78%)** · 인가대수 · 운수사 |
+| `route_stops.csv` | 11,969 | 〃 | 노선별 경유정류소 순서 |
+| `stops_tago.csv` | 3,366 | 〃 | TAGO 정류소 (node_id ↔ ARS 다리) |
 
 `grid_hwaseong.csv` 컬럼:
 
 ```
 grid_id  lon lat  x_5179 y_5179  region_code region region_kind
 pop  elderly  elderly_ratio  households  houses  workers
+a0009 a1014 a1519 a2024 a2529 a3034 a3539 a4044 a4549 a5054 a5559 a6064 a6569 a70p
 ```
+
+**연령 14구간은 `flow_hourly.csv` 컬럼과 같은 구간입니다.** 합치지 않고 남긴 이유는
+유동인구가 시군구 단위 하나뿐이라 그냥 곱하면 모든 격자에 같은 배율이 걸리고,
+z-score 는 공통 배수에 불변이라 **시간대를 바꿔도 수요 z 가 안 바뀌기** 때문입니다.
+연령별로 곱해야 격자마다 다른 시간곡선이 나옵니다. (효과는 z 최대차 0.18 로 크지 않아
+시간축의 주 동력은 여전히 공급 쪽 배차입니다.)
 
 **검증 결과 (실제 화성시와 대조)**
 
@@ -115,14 +125,35 @@ CSV 13개가 전부 **속성 테이블뿐이고 지오메트리가 없습니다.
 | 매칭 방식 | 매칭률 |
 |---|---|
 | `stops_gg.csv` 정류소id ↔ 승하차 정류소ID | 79.2% |
-| **`stops_national_hwaseong.csv` 모바일단축번호 ↔ 승하차 정류소번호** | **99.5%** ✅ |
+| `stops_national_hwaseong.csv` 모바일단축번호 ↔ 승하차 정류소번호 | 98.5% |
+| **`stops_national_hwaseong.csv` 정류장번호 ↔ 승하차 정류소ID** | **98.9%** ✅ |
+| `stops_tago.csv` node_id ↔ 승하차 정류소ID | 74.7% |
 
-**ARS번호(모바일단축번호)로 조인하세요.**
+**`정류장번호` ↔ `정류소ID` 로 조인하세요.** ARS(98.5%)보다 높고, 무엇보다
+**ID 는 전국 유일하지만 ARS 는 시군구 안에서만 유일**합니다.
 
 ```python
-board.merge(stops_nat[["모바일단축번호","위도","경도"]],
-            left_on="정류소번호", right_on="모바일단축번호", how="left")
+gid = lambda v: str(v).strip().removeprefix("GGB")   # GGB233001415 → 233001415
+board["k"]     = board["정류소ID"].map(gid)
+stops_nat["k"] = stops_nat["정류장번호"].map(gid)
+board.merge(stops_nat[["k", "위도", "경도", "모바일단축번호"]], on="k", how="left")
 ```
+
+⚠️ **`모바일단축번호` 는 `'37539.0'` 형태로 저장돼 있습니다.** pandas 가 결측 때문에
+float 로 읽어 `.0` 이 붙었습니다. 그대로 조인하면 **매칭률이 0% 로 나옵니다.**
+`.0` 을 떼고 승하차 쪽의 앞자리 0 패딩(`'04074'`)도 함께 정규화해야 합니다.
+
+> 프론트 계약상 정류장 `id` 는 `41590-{ARS}` 형식입니다(`docs/API.md`).
+> **외부 노출은 그 형식을 유지하고, 내부 조인만 정류장번호로 하세요.** 계약을
+> 바꾸지 않으면서 매칭률과 유일성을 둘 다 가져갑니다.
+
+### 2-1. 노선이 안 붙는 정류장이 25% 있습니다 🔴
+
+`route_stops.csv`(TAGO)는 승하차 정류장의 **74.7%** 만 덮습니다. 나머지는 노선 정보가
+없어 **운행빈도가 0 으로 잡힙니다** — 공급 S 의 78% 가 운행빈도인데 그게 빕니다.
+
+TAGO 에 마을버스가 빠져 있는 것이 유력합니다. `routes_village.csv`(155행, 배차·인가대수
+포함)로 메워야 합니다. **`03_join.py` 의 핵심 과제입니다.**
 
 ### 3. 유동인구는 동절기 60일치
 
