@@ -567,10 +567,56 @@ def run_recommendations(req: RecRequest):
 
 # 지원 프로바이더 설정
 _PROVIDERS = {
-    "claude": {"env": "ANTHROPIC_API_KEY", "default_model": "claude-sonnet-5",   "label": "Claude (Anthropic)"},
-    "openai": {"env": "OPENAI_API_KEY",    "default_model": "gpt-4o",            "label": "GPT-4o (OpenAI)"},
-    "gemini": {"env": "GOOGLE_API_KEY",    "default_model": "gemini-2.0-flash",  "label": "Gemini (Google)"},
+    "claude": {
+        "env": "ANTHROPIC_API_KEY",
+        "label": "Claude (Anthropic)",
+        "default_model": "claude-sonnet-5",
+        "models": [
+            {"id": "claude-sonnet-5",          "name": "Claude Sonnet 5",     "tier": "standard"},
+            {"id": "claude-opus-5",             "name": "Claude Opus 5",       "tier": "premium"},
+            {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5",   "tier": "fast"},
+        ],
+    },
+    "openai": {
+        "env": "OPENAI_API_KEY",
+        "label": "GPT (OpenAI)",
+        "default_model": "gpt-5.6-sol",
+        "models": [
+            {"id": "gpt-5.6-sol",   "name": "GPT-5.6 Sol",   "tier": "premium",  "note": "$5/$30 per MTok"},
+            {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "tier": "standard", "note": "$2/$12 per MTok"},
+            {"id": "gpt-5.6-luna",  "name": "GPT-5.6 Luna",  "tier": "fast",     "note": "$0.20/$1.20 per MTok"},
+        ],
+    },
+    "gemini": {
+        "env": "GOOGLE_API_KEY",
+        "label": "Gemini (Google)",
+        "default_model": "gemini-3.1-pro-preview",
+        "models": [
+            {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro",        "tier": "premium"},
+            {"id": "gemini-3.5-flash",        "name": "Gemini 3.5 Flash",      "tier": "standard"},
+            {"id": "gemini-3-flash-preview",  "name": "Gemini 3 Flash",        "tier": "fast"},
+            {"id": "gemini-3.1-flash-lite",   "name": "Gemini 3.1 Flash-Lite", "tier": "fast"},
+        ],
+    },
 }
+
+
+@app.get("/api/v1/providers")
+def get_providers():
+    """사용 가능한 AI 프로바이더·모델 목록 (프론트 드롭다운용)."""
+    import os
+    result = []
+    for name, cfg in _PROVIDERS.items():
+        available = bool(os.environ.get(cfg["env"]))
+        result.append({
+            "id": name,
+            "label": cfg["label"],
+            "available": available,
+            "envKey": cfg["env"],
+            "defaultModel": cfg["default_model"],
+            "models": cfg["models"],
+        })
+    return {"providers": result}
 
 
 def _detect_provider() -> str:
