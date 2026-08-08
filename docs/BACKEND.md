@@ -248,7 +248,7 @@ app.add_middleware(CORSMiddleware,
 | A1 | `01_fetch.py` | ✅ **완료.** 노선 146 · 배차 취득률 **100%** · 경유구간 11,969 |
 | A2 | `02_grid.py` ★ | ✅ **완료.** 격자 shp ↔ 화성시 경계 공간조인 → **786격자** · 읍면동 배정 |
 | A3 | `03_join.py` | ✅ **완료.** 승하차 결합 99.4% · 배분 100% 보존 · 시간대별 운행빈도 |
-| A4 | `04_model.py` | 수요 D · 공급 S · MI · 4분면 · 우선순위 · 회귀계수 |
+| A4 | `04_model.py` | ✅ **완료.** D·S·MI·4분면·우선순위·bins + `norm_stats.json` (회귀계수는 A6) |
 | A5 | `05_load.py` | `batch_grid` / `batch_grid_metrics` 적재 + `batch_run` 기록 |
 | A6 | 검증 | 예측 vs 실측 승하차 상관 (목표 R² ≥ 0.6) |
 
