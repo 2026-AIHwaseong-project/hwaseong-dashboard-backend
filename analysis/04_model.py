@@ -45,6 +45,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding="utf-8")   # 없으면 Windows 콘솔에서 한글이 깨집니다
+sys.stderr.reconfigure(encoding="utf-8")
+
 import numpy as np
 import pandas as pd
 
@@ -61,6 +64,16 @@ MI_CLAMP = 2.6
 ELD_COEF = 1.6
 QUAD = dict(need_zd=0.20, need_mi=0.75, over_zd=-0.30, over_zs=0.30,
             drt_zd=-0.35, drt_zs=-0.35, ok_zd=0.25, ok_zs=0.25, fref_q=0.30)
+
+# [8] over·ok 절대 가드. freq 는 시간대 창 전체의 운행횟수라 시간당으로 환산해서 잰다.
+MIN_FREQ_PER_H = 2.0
+PERIOD_HOURS = {"am": 2, "day": 8, "pm": 2, "night": 2}
+
+# 프론트 cells[].flowTripsPerDay 용. 전수단 원단위 2.5 × 버스 분담률 0.10.
+# ⚠️ 둘 다 가정값이다. 처음 2.5 만 곱했다가 사각지대 잠재수요가 132만 통행/일로
+#    나왔는데, 화성시 실제 버스 승차가 일 169,026 이라 8배였다. 전수단을 버스로
+#    착각한 것이었다. 사업비 단가와 같은 성격이라 화면에 가정임을 표시해야 한다.
+BUS_TRIP_RATE = 2.5 * 0.10
 
 
 def pctl(arr, q):
@@ -82,7 +95,8 @@ def zstats(v):
 def main():
     gj = pd.read_csv(D_DIR / "grid_join.csv")
     gh = pd.read_csv(D_DIR / "grid_hwaseong.csv")
-    gj = gj.merge(gh[["grid_id", "region", "region_code", "region_kind"]], on="grid_id", how="left")
+    gj = gj.merge(gh[["grid_id", "region", "region_code", "region_kind", "lon", "lat"]],
+                  on="grid_id", how="left")
 
     # coverage 600m 재산정 [2]
     gj["cov600"] = np.clip(1.0 - gj["nearest_stop_m"] / COV_THRESHOLD_M, 0.05, 1.0)
@@ -129,14 +143,23 @@ def main():
         mi = np.clip(mi_raw, -MI_CLAMP, MI_CLAMP)
         mi_naive = np.clip(zD - zS, -MI_CLAMP, MI_CLAMP)
 
-        # 4분면 (판정 순서: need > over > drt > ok > mid)
+        # [8] 절대 가드 — over·ok 는 실제 운행량이 최소선을 넘어야 한다.
+        #
+        # z 는 시간대 안에서의 상대평가라 밤에는 자 자체가 짧아진다. 그래서 가드가
+        # 없으면 야간 시간당 0.37회 다니는 향남읍 격자(인구 3,003)가 zS +0.7 로
+        # "적정" 이 되고, 0.48회 다니는 마도면이 "공급과잉" 으로 찍힌다.
+        # 실측 61곳이 이렇게 오라벨된다. "시간당 0.4회인데 적정"은 심사에서 못 버틴다.
+        freq_h = sub["freq"].values / PERIOD_HOURS[t]      # 시간대 창 길이로 나눈 시간당 운행
+        enough = freq_h >= MIN_FREQ_PER_H
+
         quad = np.full(len(sub), "mid", dtype=object)
         m_need = (zD >= QUAD["need_zd"]) & (mi >= QUAD["need_mi"])
-        m_over = ~m_need & (zD <= QUAD["over_zd"]) & (zS >= QUAD["over_zs"])
+        m_over = ~m_need & (zD <= QUAD["over_zd"]) & (zS >= QUAD["over_zs"]) & enough
         m_drt = (~m_need & ~m_over
                  & (zD <= QUAD["drt_zd"]) & (zS <= QUAD["drt_zs"])
                  & (nf >= K["fRef"]))
-        m_ok = ~m_need & ~m_over & ~m_drt & (zD >= QUAD["ok_zd"]) & (zS >= QUAD["ok_zs"])
+        m_ok = (~m_need & ~m_over & ~m_drt
+                & (zD >= QUAD["ok_zd"]) & (zS >= QUAD["ok_zs"]) & enough)
         quad[m_need], quad[m_over], quad[m_drt], quad[m_ok] = "need", "over", "drt", "ok"
 
         pw = popW.reindex(sub["grid_id"]).values
@@ -174,6 +197,12 @@ def main():
             "freq": sub["freq"], "pop": sub["pop"], "workers": sub["workers"],
             "elderly_ratio": sub["elderly_ratio"], "region": sub["region"],
             "region_code": sub["region_code"], "region_kind": sub["region_kind"],
+            # 프론트 계약(docs/API.md §3.2 cells[]) 컬럼. 모델엔 안 쓰이고 응답 전용.
+            "d_score": np.round(D * 100, 2), "s_score": np.round(S * 100, 2),
+            "flow_trips_per_day": np.round(sub["pop"].values * BUS_TRIP_RATE, 1),
+            "nearest_stop_id": sub["nearest_stop_id"],
+            "nearest_stop_m": sub["nearest_stop_m"],
+            "lon": sub["lon"], "lat": sub["lat"],
         }))
 
     res = pd.concat(rows, ignore_index=True)
@@ -184,6 +213,8 @@ def main():
         "bin_mi", "bin_demand", "bin_supply", "coverage", "freq", "pop", "workers",
         "elderly_ratio", "region", "mi_raw", "mi_naive", "nf", "bin_flow", "action",
         "region_code", "region_kind",
+        "d_score", "s_score", "flow_trips_per_day", "nearest_stop_id", "nearest_stop_m",
+        "lon", "lat",
     ]
     res[out_cols].to_csv(D_DIR / "grid_metrics.csv", index=False, encoding="utf-8-sig")
     with open(D_DIR / "norm_stats.json", "w", encoding="utf-8") as f:
@@ -202,6 +233,21 @@ def main():
     dt = res[(res.period == "am") & res.region.str.startswith("동탄", na=False)]
     print("동탄 계열 am:", dt.groupby("quadrant").size().to_dict())
     print(f"저장: grid_metrics.csv {len(res)}행 · norm_stats.json")
+
+    # ── 검증. 조용히 틀리는 종류의 계산이라 눈으로 보는 것만으론 부족하다.
+    ph = res["period"].map(PERIOD_HOURS)
+    bad = res[res["quadrant"].isin(["over", "ok"]) & (res["freq"] / ph < MIN_FREQ_PER_H)]
+    assert bad.empty, f"운행 부족한데 over/ok 인 격자 {len(bad)}곳 — 절대 가드 확인"
+    assert res["elderly_ratio"].max() <= 1.0 or (res["priority"] >= 0).all(), "고령비 클립 확인"
+    assert res["mi"].between(-MI_CLAMP, MI_CLAMP).all(), "MI 클램프가 안 먹었습니다"
+    assert (res.loc[res["quadrant"] != "need", "priority"] == 0).all(), "need 아닌데 우선순위가 있습니다"
+    for t in PERIODS:
+        share = (res[(res.period == t) & (res.quadrant == "need")].shape[0]
+                 / res["grid_id"].nunique())
+        assert 0.02 <= share <= 0.25, f"{t} need 비중 {share:.1%} — 2~25% 밖입니다"
+    sets = {t: set(res[(res.period == t) & (res.quadrant == "need")]["grid_id"]) for t in PERIODS}
+    assert any(sets[t] != sets["am"] for t in PERIODS[1:]), "모든 시간대 need 가 동일 — 시간축이 죽었습니다"
+    print("검증 통과 — 절대 가드 · 고령비 클립 · MI 클램프 · 시간축")
     return res
 
 

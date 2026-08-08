@@ -26,6 +26,10 @@
 import json
 from pathlib import Path
 
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import PoissonRegressor
@@ -41,6 +45,8 @@ CUT = dict(need_zd=0.20, need_mi=0.75, over_zd=-0.30, over_zs=0.30,
            drt_zd=-0.35, drt_zs=-0.35, ok_zd=0.25, ok_zs=0.25)
 WALK = 800.0       # 승하차 안분 반경 (03_join 설계와 일치)
 COVM = 600.0       # coverage 임계 (04_model 설계와 일치)
+MIN_FREQ_PER_H = 2.0                                        # 04_model [8] 절대 가드와 동일
+PERIOD_HOURS   = {"am": 2, "day": 8, "pm": 2, "night": 2}
 FSTAR = {"am": 4.8, "day": 8.0, "pm": 4.8, "night": 0.0}   # 신설 f* (회/창)
 PHI   = {"am": 2.4, "day": 9.6, "pm": 2.4, "night": 2.4}   # DRT φ (회/창)
 HEADWAY_MULT = 1.43   # 증편 배수 (headway × 0.7)
@@ -113,11 +119,17 @@ def compute(p, freq, nearest):
     S   = W_FREQ * nq + W_COV * cov
     zS  = (S - K["mS"]) / K["sS"]
     mi  = np.clip((ss["zD"] - zS) * ss["damp"], -MI_CLAMP, MI_CLAMP)
+    # 절대 가드 — 04_model.py [8] 과 반드시 같아야 한다. 다르면 기준선 assert 가 잡는다.
+    # z 는 시간대 안의 상대평가라 밤엔 자가 짧아진다. 가드가 없으면 야간 시간당
+    # 0.37회 다니는 격자가 "적정" 이 된다(실측 61곳 오라벨).
+    enough = (freq / PERIOD_HOURS[p]) >= MIN_FREQ_PER_H
+
     quad = np.full(N, "mid", dtype=object)
     m_need = (ss["zD"] >= CUT["need_zd"]) & (mi >= CUT["need_mi"])
-    m_over = ~m_need & (ss["zD"] <= CUT["over_zd"]) & (zS >= CUT["over_zs"])
+    m_over = ~m_need & (ss["zD"] <= CUT["over_zd"]) & (zS >= CUT["over_zs"]) & enough
     m_drt  = ~m_need & ~m_over & (ss["zD"] <= CUT["drt_zd"]) & (zS <= CUT["drt_zs"]) & (ss["nf"] >= K["fRef"])
-    m_ok   = ~m_need & ~m_over & ~m_drt & (ss["zD"] >= CUT["ok_zd"]) & (zS >= CUT["ok_zs"])
+    m_ok   = (~m_need & ~m_over & ~m_drt
+              & (ss["zD"] >= CUT["ok_zd"]) & (zS >= CUT["ok_zs"]) & enough)
     quad[m_need], quad[m_over], quad[m_drt], quad[m_ok] = "need", "over", "drt", "ok"
     b    = np.sum(mi[:, None] > np.array(MI_TH)[None, :], axis=1)
     unres = m_need | m_drt
