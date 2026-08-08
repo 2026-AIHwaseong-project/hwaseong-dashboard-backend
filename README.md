@@ -119,9 +119,10 @@ python analysis/check_api.py
 | **`03_join.py` 격자 조인** | ✅ **완료.** 승차 배분 100% 보존 · 심야 운행 출근의 9% |
 | **`04_model.py` 모델 산출** | ✅ **완료.** D·S·MI·4분면·우선순위 — need 49/40/48/85 (am/day/pm/night) · 야간 무공급 구제 포함 |
 | **`05_simulate.py` 시뮬레이션** | ✅ 완료 (팀원) · 절대 가드 동기화 |
+| **`05_load.py` JSON 산출** | ✅ **완료.** server/static/ 9파일 · 2866 정류장·140 노선·프로파일 |
 | **`06_load.py` JSON 산출** | ✅ **완료.** 프론트 계약 11개 파일 2.2MB · DB 없이 동작 |
 | 검증 (R² · 정성) | ⬜ 남음 |
-| API 서버 | ⬜ 착수 전 |
+| **API 서버 (`server/main.py`)** | ✅ **완료.** FastAPI 9개 엔드포인트 · 시뮬/추천/보고서 |
 
 **최대 난관이던 격자 공간조인이 뚫렸습니다.** 검증 근거는
 [dataset_hwaseong/README.md](dataset_hwaseong/README.md) 참조.
