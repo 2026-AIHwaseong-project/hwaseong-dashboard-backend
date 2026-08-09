@@ -91,6 +91,13 @@ app.add_middleware(
 if STATIC.exists():
     app.mount("/data", StaticFiles(directory=str(STATIC)), name="data_fallback")
 
+# 프론트엔드 정적 사이트가 옆에 체크아웃돼 있으면 같이 서빙한다 (있을 때만).
+#   http://localhost:8000/app/ → hwaseong-dashboard. 같은 원점이라 CORS 가 필요 없다.
+#   도커 이미지처럼 백엔드만 복사된 환경에서는 조용히 건너뛴다.
+_FRONT = ROOT.parent / "hwaseong-dashboard"
+if _FRONT.exists():
+    app.mount("/app", StaticFiles(directory=str(_FRONT), html=True), name="frontend")
+
 
 # ─── 공통 헬퍼 ──────────────────────────────────────────────────────────────────
 def _chk_period(p: str):

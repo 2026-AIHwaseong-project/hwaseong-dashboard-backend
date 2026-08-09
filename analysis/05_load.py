@@ -288,12 +288,14 @@ for period in PERIODS:
     # 전체 786개 중 12.8%" 처럼 뜨는데, 보는 사람이 38÷786 하면 4.8% 라 어긋난다.
     need_share = round(100.0 * need_cells / total_cells, 1) if total_cells else 0.0
 
-    elder_arr = gm_p["elderly_ratio"].fillna(0.0)
-    trips_arr = gm_p["pop"].fillna(0.0) * BUS_TRIP_RATE
+    elder_arr = gm_p["elderly_ratio"].fillna(0.0).round(4)
+    # 셀 직렬화(flowTripsPerDay)와 같은 값(셀별 반올림 정수)으로 합산한다.
+    # 원시 실수를 합산 후 반올림하면 셀 합과 ±1 어긋나 화면 간 숫자가 갈린다.
+    trips_arr = (gm_p["pop"].fillna(0.0) * BUS_TRIP_RATE).round().astype(int)
 
     # "사각지대 잠재수요" 는 need 격자만의 합이다. 전체를 더하면 라벨과 안 맞는다.
     is_need = (q_vals == "need")
-    potential_trips = int(round(float(trips_arr[is_need].sum())))
+    potential_trips = int(trips_arr[is_need].sum())
     elderly_trips   = int(round(float((trips_arr * elder_arr)[is_need].sum())))
 
     cells = []
