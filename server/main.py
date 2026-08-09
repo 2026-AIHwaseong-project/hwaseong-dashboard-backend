@@ -788,8 +788,11 @@ def draft_report(req: ReportRequest):
 
     period_name  = PERIOD_NAME[req.period]
     period_hours = PERIOD_HOURS[req.period]
-    kpi          = req.context.get("kpi", {})
-    priorities   = req.context.get("priorities", [])[:5]
+    # 프론트는 값이 없으면 키를 빼는 게 아니라 null 을 보낸다 (kpi: null).
+    # dict.get(key, 기본값) 은 키가 있으면 None 을 그대로 돌려주므로
+    # None[:5] 로 터진다 — `or` 로 None 까지 걸러야 한다.
+    kpi          = req.context.get("kpi") or {}
+    priorities   = (req.context.get("priorities") or [])[:5]
 
     # 프론트가 context 를 안 보내도 서버가 자기 데이터로 채운다.
     # 그래야 폴백이 빈 보고서가 되지 않는다.
