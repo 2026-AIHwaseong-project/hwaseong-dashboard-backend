@@ -25,6 +25,10 @@
 import json
 import math
 import os
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")   # Windows 콘솔 한글 깨짐 방지
+sys.stderr.reconfigure(encoding="utf-8")
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -38,7 +42,16 @@ STATIC_DIR = ROOT / "server" / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 PERIODS = ["am", "day", "pm", "night"]
-TRIP_COEF = 3200
+
+# 일 버스통행 환산 — 인구 × (전수단 원단위 2.5 × 버스분담률 0.10).
+#
+# 목업의 TRIP_COEF=3200 은 정규화값(0~1)에 곱하는 임의 계수라 실데이터 근거가 없다.
+# 그대로 쓰면 사각지대 잠재수요가 104만 통행/일이 나오는데, 화성시 실제 버스 승차가
+# 일 169,026 이라 6.2배다. "사각지대 하나가 시 전체 이용의 6배"는 발표에서 못 버틴다.
+# 인구 기준으로 바꾸면 잠재/실현 = 2.18배로 억압수요가 설명 가능한 범위에 들어온다.
+# ⚠️ 두 계수 모두 가정값이다. meta.assumptions 에 confirmed:false 로 실어 보낸다.
+TRIP_RATE, BUS_SHARE = 2.5, 0.10
+BUS_TRIP_RATE = TRIP_RATE * BUS_SHARE
 MI_THRESHOLDS = [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2]
 TODAY = str(date.today())
 HOURS_LIST = list(range(5, 24))  # [5, 6, ..., 23]
@@ -271,15 +284,17 @@ for period in PERIODS:
     drt_cells   = int((q_vals == "drt").sum())
     over_cells  = int((q_vals == "over").sum())
     total_cells = len(gm_p)
-    need_share  = round(100.0 * (need_cells + drt_cells) / total_cells, 1) if total_cells else 0.0
+    # needShare 는 need 만 센다. drt 를 같이 세면 화면에 "고수요·저공급 38개 ·
+    # 전체 786개 중 12.8%" 처럼 뜨는데, 보는 사람이 38÷786 하면 4.8% 라 어긋난다.
+    need_share = round(100.0 * need_cells / total_cells, 1) if total_cells else 0.0
 
-    nf_arr     = gm_p["nf"].fillna(0.0)
-    elder_arr  = gm_p["elderly_ratio"].fillna(0.0)
-    mi_arr     = gm_p["mi"].fillna(0.0)
+    elder_arr = gm_p["elderly_ratio"].fillna(0.0)
+    trips_arr = gm_p["pop"].fillna(0.0) * BUS_TRIP_RATE
 
-    potential_trips = int(round(float((nf_arr * TRIP_COEF).sum())))
-    elderly_trips   = int(round(float((nf_arr * TRIP_COEF * elder_arr).sum())))
-    avg_mi          = round(float(mi_arr.mean()), 3)
+    # "사각지대 잠재수요" 는 need 격자만의 합이다. 전체를 더하면 라벨과 안 맞는다.
+    is_need = (q_vals == "need")
+    potential_trips = int(round(float(trips_arr[is_need].sum())))
+    elderly_trips   = int(round(float((trips_arr * elder_arr)[is_need].sum())))
 
     cells = []
     for gid in gm_p.index:
@@ -313,7 +328,7 @@ for period in PERIODS:
             "zSupply":       round(safe_float(r_gm["zS"]), 4),
             "mi":            round(safe_float(r_gm["mi"]), 4),
             "flow":          round(safe_float(r_gm["nf"]), 4),
-            "flowTripsPerDay": int(round(safe_float(r_gm["nf"]) * TRIP_COEF)),
+            "flowTripsPerDay": int(round(safe_float(r_gm["pop"]) * BUS_TRIP_RATE)),
             "elderlyRatio":  round(safe_float(r_gm["elderly_ratio"]), 4),
             "coverage":      round(safe_float(r_gm["coverage"]), 4),
             "quadrant":      quad,
@@ -333,10 +348,7 @@ for period in PERIODS:
 
     out = {
         "period": period,
-        "scale": {
-            "miThresholds": MI_THRESHOLDS,
-            "tripCoef":     TRIP_COEF,
-        },
+        "scale": {"miThresholds": MI_THRESHOLDS},
         "kpi": {
             "needCells":          need_cells,
             "drtCells":           drt_cells,
@@ -345,7 +357,8 @@ for period in PERIODS:
             "needShare":          need_share,
             "potentialTripsPerDay": potential_trips,
             "elderlyTripsPerDay": elderly_trips,
-            "avgMi":              avg_mi,
+            # avgMi 는 뺐다. 기준통계가 시간대별 z 라 평균이 항상 ≈0 인 항등식이라
+            # 화면에 띄울 정보가 없다(프론트 자체 분석에서도 폐기 권고).
         },
         "cells": cells,
     }
@@ -394,7 +407,7 @@ for _, row in stops.iterrows():
         "kind":               kind,
         "routes":             routes_list,
         "isEstimated":        True,
-        "estimationMethod":   "일자별 승하차를 통신 유동인구 시간배율로 안분",
+        "estimationMethod":   "일자별 승하차를 연령가중 유동인구 시간배율로 안분",
         "hours":              HOURS_LIST,
         "boardings":          boardings_hr,
         "alightings":         alightings_hr,
@@ -530,6 +543,47 @@ meta = {
         },
         "defaultBudget": 3000000000,
     },
+    # 어느 수치가 실측이고 어느 수치가 추정인지.
+    #
+    # ⚠️ 프론트 목이 "교통카드빅데이터(STCIS)" 와 "통신사 유동인구" 로 적어뒀는데
+    #    둘 다 우리가 안 쓰는 데이터다. STCIS 는 신청 리드타임 대비 이득이 없어
+    #    제외했고(기획서 §6.3), 통신사는 SKT 가 제공 불가 회신을 보냈다(§6.4).
+    #    심사에서 출처를 물었을 때 답할 수 없는 게 제일 위험하므로 실제 출처를 쓴다.
+    "dataQuality": {
+        "boardingDaily": {
+            "level": "observed", "label": "일별 승하차",
+            "source": "경기데이터드림 정류소별 승하차 인원 집계 (2025-12~2026-03)",
+        },
+        "boardingHourly": {
+            "level": "estimated", "label": "시간대별 승하차",
+            "method": "일자별 승하차를 연령가중 유동인구 시간배율로 안분",
+            "note": "원자료에 시간대 정보가 없습니다.",
+        },
+        "flowHourly": {
+            "level": "observed", "label": "시간대별 유동인구",
+            "source": "경기도 분석갤러리 유동인구(화성시) · 2023-12~2024-01",
+            "note": "승하차와 약 2년 시차가 있어 시간배율로만 사용합니다.",
+        },
+        "headway": {
+            "level": "observed", "label": "배차간격",
+            "source": "경기도 버스노선 조회 API (peekAlloc/nPeekAlloc/nightAlloc)",
+        },
+        "boundary": {
+            "level": "observed", "label": "행정경계",
+            "source": "SGIS 통계지리정보서비스 읍면동 경계 (bnd_dong_00_2025_2Q)",
+        },
+    },
+    # 근거가 없는 값들. 사업비와 같은 성격이라 화면에 가정임을 표시해야 한다.
+    "assumptions": {
+        "busTripRate": {
+            "value": BUS_TRIP_RATE, "confirmed": False,
+            "note": f"1인 1일 버스통행 = 전수단 원단위 {TRIP_RATE} × 버스분담률 {BUS_SHARE}",
+        },
+        "minFreqPerHour": {
+            "value": 2.0, "confirmed": False,
+            "note": "적정·공급과잉 판정의 절대 하한. 야간 상대평가 오라벨 방지",
+        },
+    },
     "formula": {
         "demand":               "0.5·norm_board + 0.5·norm_potential",
         "supply":               "0.78·norm_freq + 0.22·coverage",
@@ -580,6 +634,49 @@ meta = {
 
 write_json(STATIC_DIR / "meta.json", meta)
 print("  meta.json 저장 완료")
+
+# ── 10-1. priorities_{period}.json (API §3.3) ────────────────────────────────
+print("priorities_{period}.json 생성 중...")
+
+
+def priority_reason(r):
+    """사람이 읽을 문장. 화면과 AI 보고서에 그대로 인용된다."""
+    d, s = int(round(safe_float(r["D"]) * 100)), int(round(safe_float(r["S"]) * 100))
+    m = int(safe_float(r["nearest_stop_m"]))
+    act = str(r["action"])
+    if act == "NEW_STOP":
+        why = f"가장 가까운 정류장까지 {m}m 로 도보권 밖"
+    elif act == "DRT":
+        why = "노선 자체가 닿지 않아 고정노선보다 수요응답형이 적합"
+    else:
+        why = f"정류장은 도보권({m}m)이나 운행이 부족"
+    e = safe_float(r["elderly_ratio"])
+    return f"수요지수 {d} 대비 공급지수 {s}, {why}" + (f", 고령 인구 비중 {e:.0%}" if e >= 0.2 else "")
+
+
+# grid_metrics.csv 에 nearest_stop_id/m 가 이미 들어 있다(04_model.py 에서 실음).
+# gj 와 다시 조인하면 접미사가 붙어 KeyError 가 난다.
+for period in PERIODS:
+    top = (gm[(gm["period"] == period) & (gm["priority"] > 0)]
+           .nlargest(10, "priority"))
+    items = []
+    for rank, (_, r) in enumerate(top.iterrows(), 1):
+        act = str(r["action"])
+        items.append({
+            "rank": rank, "cellId": str(r["grid_id"]), "name": str(r["region"]),
+            "mi": round(safe_float(r["mi"]), 3),
+            "priorityScore": round(safe_float(r["priority"]), 4),
+            "demand": int(round(safe_float(r["D"]) * 100)),
+            "supply": int(round(safe_float(r["S"]) * 100)),
+            "flowTripsPerDay": int(round(safe_float(r["pop"]) * BUS_TRIP_RATE)),
+            "elderlyRatio": round(safe_float(r["elderly_ratio"]), 4),
+            "coverage": round(safe_float(r["coverage"]), 4),
+            "action": act, "actionLabel": ACTION_LABEL.get(act, act),
+            "nearestStopId": str(r["nearest_stop_id"]) if pd.notna(r["nearest_stop_id"]) else "",
+            "reason": priority_reason(r),
+        })
+    write_json(STATIC_DIR / f"priorities_{period}.json", {"period": period, "items": items})
+    print(f"  priorities_{period}.json: {len(items)}건")
 
 # ── 11. PostgreSQL 적재 (graceful fallback) ──────────────────────────────────
 print("PostgreSQL 적재 시도 중...")

@@ -84,9 +84,12 @@ app.add_middleware(
 )
 
 # 프론트 폴백: fetch("/api/v1/…").catch(() => fetch("/data/grid_am.json"))
-_DATA_DIR = ROOT / "data"
-if _DATA_DIR.exists():
-    app.mount("/data", StaticFiles(directory=str(_DATA_DIR)), name="data_fallback")
+#
+# server/static 을 그대로 /data 로 내보낸다. 별도 data/ 폴더에 같은 JSON 을 한 벌 더
+# 두면 어느 쪽이 최신인지 헷갈리고 실제로 갈라진다(05_load 와 06_load 가 그랬다).
+# 생성기는 05_load.py 하나뿐이고 산출도 server/static 한 곳이다.
+if STATIC.exists():
+    app.mount("/data", StaticFiles(directory=str(STATIC)), name="data_fallback")
 
 
 # ─── 공통 헬퍼 ──────────────────────────────────────────────────────────────────

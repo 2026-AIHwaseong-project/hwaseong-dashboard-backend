@@ -128,18 +128,16 @@ Accept: application/json
 {
   "period": "am",
   "scale": {
-    "miThresholds": [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2],
-    "tripCoef": 3200
+    "miThresholds": [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2]
   },
   "kpi": {
     "needCells": 38,
     "drtCells": 63,
     "overCells": 28,
     "totalCells": 786,
-    "needShare": 12.8,
-    "potentialTripsPerDay": 1044504,
-    "elderlyTripsPerDay": 234919,
-    "avgMi": 0.0
+    "needShare": 4.8,
+    "potentialTripsPerDay": 59502,
+    "elderlyTripsPerDay": 5517
   },
   "cells": [ /* 786개, 아래 셀 필드 참고 */ ]
 }
@@ -310,7 +308,7 @@ Accept: application/json
   "kind": "rural",
   "routes": ["GGB233000067"],
   "isEstimated": true,
-  "estimationMethod": "일자별 승하차를 통신 유동인구 시간배율로 안분",
+  "estimationMethod": "일자별 승하차를 연령가중 유동인구 시간배율로 안분",
   "hours": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
   "boardings":  [0, 2, 18, 31, 12, 8, 6, 9, 7, 6, 8, 11, 29, 22, 10, 7, 5, 4, 2],
   "alightings": [0, 1, 12, 21, 9, 6, 5, 7, 5, 5, 6,  9, 20, 17,  8, 5, 4, 3, 2],
@@ -396,15 +394,15 @@ Accept: application/json
       "period": "am", "periodName": "출근",
       "kpi": {
         "needCells": 31, "drtCells": 63, "overCells": 28, "totalCells": 786,
-        "needShare": 10.4, "potentialTripsPerDay": 1044504, "elderlyTripsPerDay": 234919, "avgMi": -0.003
+        "needShare": 3.9, "potentialTripsPerDay": 51120, "elderlyTripsPerDay": 4703
       },
       "baseline": {
         "needCells": 38, "drtCells": 63, "overCells": 28, "totalCells": 786,
-        "needShare": 12.8, "potentialTripsPerDay": 1044504, "elderlyTripsPerDay": 234919, "avgMi": 0.0
+        "needShare": 4.8, "potentialTripsPerDay": 59502, "elderlyTripsPerDay": 5517
       },
       "delta": {
         "needCells": -7, "drtCells": 0, "overCells": 0,
-        "needShare": -2.4, "avgMi": -0.003
+        "needShare": -0.9
       }
     }
     /* + day, pm, night */
@@ -527,7 +525,7 @@ Accept: application/json
   "tone": "공문",
   "sections": ["summary", "status", "problem", "plan", "effect", "next"],
   "context": {
-    "kpi": { "needCells": 38, "totalCells": 786, "needShare": 12.8, "potentialTripsPerDay": 1044504, "avgMi": 0.0 },
+    "kpi": { "needCells": 38, "totalCells": 786, "needShare": 4.8, "potentialTripsPerDay": 59502 },
     "priorities": [ /* /priorities 응답의 items */ ],
     "simulation": { /* /simulations 응답 (선택) */ },
     "recommendation": { /* /recommendations 응답 (선택) */ }
@@ -650,7 +648,7 @@ docker-compose up --build
 
 # 정적 JSON 사전 생성 (서버 없이 /data/ 폴백 활용 시)
 python analysis/05_load.py   # server/static/ 생성
-python analysis/06_load.py   # data/ 생성
+python analysis/05_load.py   # server/static/ 생성 (서버가 /data 로도 서빙)
 ```
 
 ## 부록 B — 환경변수 (`.env`)
