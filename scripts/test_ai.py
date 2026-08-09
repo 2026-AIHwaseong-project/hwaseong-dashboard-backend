@@ -29,6 +29,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Windows 콘솔 기본 코드페이지가 cp949 라 em dash(—) 에서 UnicodeEncodeError 로 죽는다.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 ROOT = Path(__file__).resolve().parent.parent
 
 

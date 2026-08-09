@@ -877,7 +877,11 @@ def _call_ai(provider: str, model: str, prompt: str) -> str:
             max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
-        return msg.content[0].text
+        # content[0] 이 항상 텍스트인 게 아니다. 최신 모델은 ThinkingBlock 을
+        # 먼저 넣어 보내는데, 첫 블록만 보면
+        #   AttributeError: 'ThinkingBlock' object has no attribute 'text'
+        # 로 죽는다(실측). 텍스트 블록만 골라 이어붙인다.
+        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
 
     if provider == "openai":
         try:
