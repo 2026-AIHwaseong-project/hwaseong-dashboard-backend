@@ -52,11 +52,35 @@ def mask(v):
     return f"{v[:8]}… ({len(v)}자)"
 
 
+def _env_file_values():
+    """.env 파일이 직접 담고 있는 값. 셸/시스템 환경변수와 출처를 구분하기 위한 것."""
+    try:
+        from dotenv import dotenv_values
+        return dotenv_values(ROOT / ".env")
+    except ImportError:
+        return {}
+
+
 def print_status(m):
+    envfile = _env_file_values()
     print("─── AI 설정 상태 ──────────────────────────────────────────")
     for name, cfg in m._PROVIDERS.items():
         key = os.environ.get(cfg["env"])
-        print(f"  {name:<7} {cfg['env']:<18} {mask(key):<24} 기본모델 {m._default_model(name)}")
+        # 어디서 온 키인지 표시한다. .env 에 없는데 잡혀 있으면 셸/시스템
+        # 환경변수(예: Windows 사용자 환경변수)다 — .env 를 고쳐도 안 바뀌고,
+        # load_dotenv 는 이미 있는 환경변수를 덮어쓰지 않으므로 그쪽이 이긴다.
+        if not key:
+            src = ""
+        elif envfile.get(cfg["env"]) == key:
+            src = "[.env]"
+        else:
+            src = "[셸/시스템 환경변수 ⚠️]"
+        print(f"  {name:<7} {cfg['env']:<18} {mask(key):<24} {src:<24} 기본모델 {m._default_model(name)}")
+    if any(os.environ.get(c["env"]) and envfile.get(c["env"]) != os.environ.get(c["env"])
+           for c in m._PROVIDERS.values()):
+        print("  ⚠️ 셸/시스템 환경변수 키는 .env 보다 우선합니다. 지우려면 (Windows PowerShell):")
+        print("     [Environment]::SetEnvironmentVariable('OPENAI_API_KEY', $null, 'User')")
+        print("     실행 후 터미널을 새로 여세요.")
     print(f"  AI_PROVIDER = {os.environ.get('AI_PROVIDER') or '(미설정)'}")
     print(f"  AI_MODEL    = {os.environ.get('AI_MODEL') or '(미설정)'}")
     auto = m._detect_provider()
