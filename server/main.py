@@ -660,7 +660,8 @@ def run_recommendations(req: RecRequest):
     am_blk = next((x for x in sim_resp["periods"] if x["period"] == req.period),
                   sim_resp["periods"][0])
     resolved_cells = -int(am_blk["delta"]["needCells"])
-    resolved_trips = int(sim_resp.get("effectiveness", {}).get("resolvedTripsPerDay", 0))
+    resolved_trips = max(0, -int(am_blk["delta"]["potentialTripsPerDay"]))
+    resolved_eld   = max(0, -int(am_blk["delta"]["elderlyTripsPerDay"]))
 
     result = {
         "method": "budget-constrained greedy marginal benefit",
@@ -693,6 +694,9 @@ def run_recommendations(req: RecRequest):
             "budgetUsedPct": round(total_krw / req.budgetKrw * 100, 1) if req.budgetKrw else 0.0,
             "expectedResolvedCells": resolved_cells,
             "expectedResolvedTrips": resolved_trips,
+            # 계약(docs/API.md §3.7)에 있는데 빠져 있던 필드. 프론트 어댑터가
+            # delta 로 보충하고 있었지만, 서버가 주는 게 맞다.
+            "expectedResolvedElderlyTrips": resolved_eld,
             "krwPerTrip": int(total_krw / resolved_trips) if resolved_trips > 0 else None,
             "stoppedBecause": stopped,
             "costCompareBasis": "total",
