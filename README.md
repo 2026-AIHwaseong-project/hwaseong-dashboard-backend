@@ -123,7 +123,8 @@ python analysis/check_api.py
 | **`05_simulate.py` 시뮬레이션** | ✅ 완료 (팀원) · 절대 가드 동기화 |
 | **`05_load.py` JSON 산출** | ✅ **완료.** `server/static/` 13파일 · DB 없이 동작 · `/data` 로도 서빙 |
 | **검증 (`07_validate.py`)** | ✅ **완료.** 홀드아웃 로그 R² **0.801** (목표 0.6) · 배차 탄력성 +0.431 |
-| **API 서버 (`server/main.py`)** | ✅ **완료.** FastAPI 9개 엔드포인트 · 시뮬/추천/보고서 |
+| **API 서버 (`server/main.py`)** | ✅ **완료.** FastAPI 10개 엔드포인트 · 시뮬/추천/보고서 |
+| PostgreSQL | ⬜ **미사용.** 정적 JSON 으로 동작 — 이유는 [BACKEND.md §0-1](docs/BACKEND.md) |
 
 **최대 난관이던 격자 공간조인이 뚫렸습니다.** 검증 근거는
 [dataset_hwaseong/README.md](dataset_hwaseong/README.md) 참조.

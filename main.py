@@ -14,6 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding="utf-8")   # Windows 콘솔 한글 깨짐 방지
+sys.stderr.reconfigure(encoding="utf-8")
+
 ROOT = Path(__file__).resolve().parent
 STATIC_META = ROOT / "server" / "static" / "meta.json"
 LOAD_SCRIPT  = ROOT / "analysis" / "05_load.py"
