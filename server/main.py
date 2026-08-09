@@ -19,6 +19,7 @@
 """
 import importlib.util
 import json
+import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -33,6 +34,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# .env 로드 — AI 프로바이더 키와 기본값을 파일 하나로 관리한다.
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY : 프로바이더별 키
+#   AI_PROVIDER : provider=auto 요청의 기본 프로바이더 (claude|openai|gemini)
+#   AI_MODEL    : 기본 모델 재지정 (AI_PROVIDER 와 함께 설정할 때만 적용)
+# 이미 셸에 있는 환경변수가 우선한다(load_dotenv 는 덮어쓰지 않음).
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass  # python-dotenv 미설치면 셸 환경변수만 사용
 STATIC = ROOT / "server" / "static"
 PERIODS = ["am", "day", "pm", "night"]
 PERIOD_NAME = {"am": "출근", "day": "낮", "pm": "퇴근", "night": "심야"}
@@ -614,7 +626,6 @@ _PROVIDERS = {
 @app.get("/api/v1/providers")
 def get_providers():
     """사용 가능한 AI 프로바이더·모델 목록 (프론트 드롭다운용)."""
-    import os
     result = []
     for name, cfg in _PROVIDERS.items():
         available = bool(os.environ.get(cfg["env"]))
@@ -623,19 +634,37 @@ def get_providers():
             "label": cfg["label"],
             "available": available,
             "envKey": cfg["env"],
-            "defaultModel": cfg["default_model"],
+            "defaultModel": _default_model(name),
             "models": cfg["models"],
         })
-    return {"providers": result}
+    # provider=auto 일 때 실제로 어디로 가는지 (.env AI_PROVIDER 반영)
+    return {"providers": result, "configuredDefault": _detect_provider()}
 
 
 def _detect_provider():
-    """환경변수를 확인해 사용 가능한 첫 번째 프로바이더 반환. 하나도 없으면 None."""
-    import os
+    """provider=auto 의 결정 순서.
+
+    ① .env 의 AI_PROVIDER (키도 있어야 함 — 키 없는 지정은 무시하고 다음으로)
+    ② 키를 보유한 첫 번째 프로바이더
+    ③ 하나도 없으면 None → 규칙 기반 초안(_fallback_report)
+    """
+    pref = os.environ.get("AI_PROVIDER", "").strip().lower()
+    if pref in _PROVIDERS and os.environ.get(_PROVIDERS[pref]["env"]):
+        return pref
     for name, cfg in _PROVIDERS.items():
         if os.environ.get(cfg["env"]):
             return name
     return None
+
+
+def _default_model(provider: str) -> str:
+    """기본 모델. .env 의 AI_MODEL 은 AI_PROVIDER 로 지정한 프로바이더에만
+    적용한다 — 다른 프로바이더 요청에 남의 모델 ID 가 넘어가는 사고 방지."""
+    env_provider = os.environ.get("AI_PROVIDER", "").strip().lower()
+    env_model = os.environ.get("AI_MODEL", "").strip()
+    if env_model and env_provider == provider:
+        return env_model
+    return _PROVIDERS[provider]["default_model"]
 
 
 def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
@@ -775,7 +804,7 @@ def draft_report(req: ReportRequest):
     # 500 을 던지면 화면의 「AI 보고서 생성」 버튼이 그냥 깨진다.
     if provider is None:
         return _fallback_report(req.period, kpi, priorities)
-    model = req.model or _PROVIDERS[provider]["default_model"]
+    model = req.model or _default_model(provider)
     sim_ctx      = req.context.get("simulation")
     rec_ctx      = req.context.get("recommendation")
 
