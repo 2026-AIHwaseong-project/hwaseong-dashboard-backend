@@ -166,18 +166,52 @@ def _apply_cumulative(sim, placements: list) -> dict:
     return state
 
 
+def _trips_kpi(p: str, quad_arr) -> tuple:
+    """사각지대 잠재수요 — /grid 와 **같은 산식**이어야 한다.
+
+    이전에는 sim.S0[p]["potential"] 을 786격자 전체에 대해 합했는데, 그건
+    grid_join 의 시간대별 연령가중 인구지 일 버스통행이 아니다. 그래서 같은
+    이름의 KPI 가 화면 두 곳에서 다른 값으로 나왔다.
+
+        /grid          59,501     (need 격자의 flowTripsPerDay 합)
+        /simulations   80,182     (전체 격자의 potential 합)
+
+    elderlyTripsPerDay 는 더 어긋나 있었다. potential × (1+1.6·고령비) 였는데
+    그건 고령 통행이 아니라 고령가중이 곱해진 전체 통행이라, 전체(94,218)가
+    사각지대(5,517)보다 큰 값이 나왔다.
+
+    여기서는 05_load.py 와 같이 **need 격자의 flowTripsPerDay** 를 센다.
+    셀별 반올림 정수를 합해야 화면의 셀 합과 어긋나지 않는다(1916b8b 와 같은 이유).
+    """
+    cells = DATA["cells"][p]
+    trips, eld = 0, 0.0
+    for gid, q in zip(DATA["sim"].GIDS, quad_arr):
+        if q != "need":
+            continue
+        c = cells.get(gid)
+        if c is None:
+            continue
+        t = int(c["flowTripsPerDay"])
+        trips += t
+        eld += t * float(c["elderlyRatio"])
+    # 고령분은 곱을 다 더한 뒤 한 번만 반올림한다. 셀마다 반올림하면
+    # 05_load.py 와 ±1 어긋난다(실측 5,517 대 5,516).
+    return trips, int(round(eld))
+
+
 def _period_kpi(sim, p: str, r: dict) -> tuple:
     bk = sim.BASE_KPI[p]
     n  = sim.N
+    now_trips, now_eld = _trips_kpi(p, r["quad"])
+    base_trips, base_eld = _trips_kpi(p, sim.S0[p]["quad0"])
     kpi = {
         "needCells": r["need"],
         "drtCells": r["drt"],
         "overCells": int((r["quad"] == "over").sum()),
         "totalCells": n,
         "needShare": round(r["need"] / n * 100, 1),
-        "potentialTripsPerDay": int(sim.S0[p]["potential"].sum()),
-        "elderlyTripsPerDay": int((sim.S0[p]["potential"] * sim.S0[p]["eldw"]).sum()),
-        "avgMi": round(float(r["mi"].mean()), 3),
+        "potentialTripsPerDay": now_trips,
+        "elderlyTripsPerDay": now_eld,
     }
     baseline = {
         "needCells": bk["need"],
@@ -185,12 +219,14 @@ def _period_kpi(sim, p: str, r: dict) -> tuple:
         "overCells": int((sim.S0[p]["quad0"] == "over").sum()),
         "totalCells": n,
         "needShare": round(bk["need"] / n * 100, 1),
-        "potentialTripsPerDay": int(sim.S0[p]["potential"].sum()),
-        "elderlyTripsPerDay": int((sim.S0[p]["potential"] * sim.S0[p]["eldw"]).sum()),
-        "avgMi": round(float(sim.S0[p]["mi0"].mean()), 3),
+        "potentialTripsPerDay": base_trips,
+        "elderlyTripsPerDay": base_eld,
     }
+    # avgMi 는 뺐다. 기준통계가 시간대별 z 라 평균이 항상 ≈0 인 항등식이고
+    # 실제로 -0.0 이 나온다(프론트 자체 분석에서도 폐기 권고).
     delta = {k: round(kpi[k] - baseline[k], 4) for k in
-             ["needCells", "drtCells", "overCells", "needShare", "avgMi"]}
+             ["needCells", "drtCells", "overCells", "needShare",
+              "potentialTripsPerDay", "elderlyTripsPerDay"]}
     return kpi, baseline, delta
 
 
@@ -369,12 +405,46 @@ class SimRequest(BaseModel):
     placements: list = []
 
 
+MAX_COUNT = 20   # 한 격자에 같은 수단을 몇 개까지. 그 이상은 실무적으로 의미가 없다.
+
+
+def _validate_placements(sim, placements: list) -> list:
+    """배치 입력 검증. 통과한 것만 돌려주고 나머지는 400 으로 막는다.
+
+    검증이 없을 때 실제로 이런 일이 났다.
+      · 없는 cellId → 효과는 0인데 비용 4,200만원이 그대로 청구됐다.
+        (_apply_cumulative 는 건너뛰는데 비용 계산은 별도라 안 걸러졌다)
+      · type: "nosuch" → COST_KRW[mode] 에서 KeyError → 500
+      · count: 999 → 정류장 999개에 419억원. 효과는 1칸.
+    조용히 틀린 예산을 보여주느니 왜 틀렸는지 알려주고 막는 게 낫다.
+    """
+    out = []
+    for i, pl in enumerate(placements):
+        if not isinstance(pl, dict):
+            raise HTTPException(400, f"placements[{i}] 는 객체여야 합니다.")
+        mode = pl.get("type", "stop")
+        if mode not in COST_KRW:
+            raise HTTPException(400, f"placements[{i}].type 은 {list(COST_KRW)} 중 하나여야 합니다 (받은 값: {mode!r})")
+        gid = str(pl.get("cellId", ""))
+        if gid not in sim.IDX:
+            raise HTTPException(400, f"placements[{i}].cellId 를 찾을 수 없습니다: {gid!r}")
+        try:
+            count = int(pl.get("count", 1))
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"placements[{i}].count 는 정수여야 합니다.")
+        if not 1 <= count <= MAX_COUNT:
+            raise HTTPException(400, f"placements[{i}].count 는 1~{MAX_COUNT} 사이여야 합니다 (받은 값: {count})")
+        out.append({"type": mode, "cellId": gid, "count": count})
+    return out
+
+
 @app.post("/api/v1/simulations")
 def run_simulation(req: SimRequest):
     _chk_period(req.period)
     sim   = DATA["sim"]
-    state = _apply_cumulative(sim, req.placements)
-    return _build_sim_response(sim, req.placements, state, req.name, req.budgetKrw)
+    placements = _validate_placements(sim, req.placements)
+    state = _apply_cumulative(sim, placements)
+    return _build_sim_response(sim, placements, state, req.name, req.budgetKrw)
 
 
 # ─── 8. POST /api/v1/recommendations ──────────────────────────────────────────
@@ -390,7 +460,13 @@ class RecRequest(BaseModel):
 
 def _greedy(sim, strategy: str, budget: int, max_pl: int,
             allowed_types: list, region_ids=None) -> tuple:
-    """전략별 그리디. placed = [(mode, gi, gid, tB, cost)] 반환."""
+    """전략별 그리디. (placed, state, stopped) 반환.
+
+    stopped 는 왜 멈췄는지다. 프론트 계약(docs/API.md §3.7)에 있는 값이고,
+    없으면 화면이 "0건인데 예산 소진" 같은 모순 문구를 낸다.
+        max_reached | budget_exhausted | budget_too_small
+        no_further_gain | no_candidate
+    """
     state = {p: {"freq": sim.S0[p]["freq"].copy(),
                  "nearest": sim.S0[p]["nearest"].copy()} for p in PERIODS}
     placed, used = [], set()
@@ -400,10 +476,15 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
 
     am_quad   = sim.S0["am"]["quad0"]
     cand_mask = np.isin(am_quad, ["need", "drt"])
-    if region_ids:
+    # `if region_ids:` 로 쓰면 빈 집합이 falsy 라 필터가 통째로 건너뛰어진다.
+    # 오타난 읍면동을 보냈을 때 조용히 화성시 전체 결과가 나오는 게 더 위험하다.
+    # None(=범위 지정 없음)과 빈 집합(=그 동에 후보 없음)을 구분한다.
+    if region_ids is not None:
         in_reg    = np.array([sim.GIDS[i] in region_ids for i in range(sim.N)])
         cand_mask = cand_mask & in_reg
     cand_idx = np.where(cand_mask)[0]
+    if len(cand_idx) == 0:
+        return [], state, "no_candidate"
 
     types = ["stop"] if strategy == "quick" else list(allowed_types)
 
@@ -415,8 +496,14 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                                        np.clip(1 - state[p]["nearest"] / sim.COVM, .05, 1))))
              for p in PERIODS}
 
+    stopped = "max_reached"
+    min_cost = min(COST_KRW[m] for m in (["stop"] if strategy == "quick" else allowed_types))
+    if budget < min_cost:
+        return [], state, "budget_too_small"
+
     for _ in range(max_pl):
-        if budget_left <= 0:
+        if budget_left < min_cost:
+            stopped = "budget_exhausted"
             break
         cov_now = np.clip(1 - state["am"]["nearest"] / sim.COVM, 0.05, 1.0)
         best = None
@@ -475,6 +562,9 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                     best = {"mode": mode, "gi": gi, "tB": tB, "eff": eff, "cost": cost}
 
         if best is None:
+            # 예산은 남았는데 넣을 곳이 없다. 한 건도 못 넣었으면 예산이 모자란 것.
+            stopped = "no_further_gain" if placed else (
+                "budget_too_small" if budget_left < min_cost else "no_candidate")
             break
 
         gi, mode, cost = best["gi"], best["mode"], best["cost"]
@@ -509,7 +599,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
         region_cnt[reg] = region_cnt.get(reg, 0) + 1
         placed.append({"mode": mode, "gi": gi, "gid": gid, "tB": best["tB"], "cost": cost})
 
-    return placed, state
+    return placed, state, stopped
 
 
 @app.post("/api/v1/recommendations")
@@ -517,6 +607,15 @@ def run_recommendations(req: RecRequest):
     _chk_period(req.period)
     if req.strategy not in STRAT_META:
         raise HTTPException(400, f"strategy는 {list(STRAT_META)} 중 하나여야 합니다.")
+    bad = [t for t in req.allowedTypes if t not in COST_KRW]
+    if bad:
+        raise HTTPException(400, f"allowedTypes 에 알 수 없는 수단이 있습니다: {bad}")
+    if not req.allowedTypes:
+        raise HTTPException(400, "allowedTypes 가 비어 있습니다.")
+    if req.budgetKrw < 0:
+        raise HTTPException(400, "budgetKrw 는 0 이상이어야 합니다.")
+    if not 1 <= req.maxPlacements <= 50:
+        raise HTTPException(400, "maxPlacements 는 1~50 사이여야 합니다.")
 
     sim = DATA["sim"]
     region_ids = None
@@ -524,8 +623,12 @@ def run_recommendations(req: RecRequest):
         region_ids = {c["id"] for c in DATA["cells"]["am"].values()
                       if c["region"] == req.region}
 
-    placed, final_state = _greedy(
-        sim, req.strategy, req.budgetKrw, req.maxPlacements,
+    # region 이 오면 balance(지역 균형)는 성립하지 않는다. 동별 1건 상한이
+    # 곧 1건 추천이라서다. efficiency 로 대체하고 alternatives 에서도 뺀다.
+    strategy = "efficiency" if (req.region and req.strategy == "balance") else req.strategy
+
+    placed, final_state, stopped = _greedy(
+        sim, strategy, req.budgetKrw, req.maxPlacements,
         list(req.allowedTypes), region_ids,
     )
 
@@ -553,25 +656,61 @@ def run_recommendations(req: RecRequest):
     ]
     total_krw = sum(pl["cost"] for pl in placed)
 
+    # 해소 효과는 시뮬레이션 응답에서 그대로 가져온다. 따로 세면 두 값이 어긋난다.
+    am_blk = next((x for x in sim_resp["periods"] if x["period"] == req.period),
+                  sim_resp["periods"][0])
+    resolved_cells = -int(am_blk["delta"]["needCells"])
+    resolved_trips = int(sim_resp.get("effectiveness", {}).get("resolvedTripsPerDay", 0))
+
     result = {
-        "strategy": req.strategy,
-        "strategyLabel": STRAT_META[req.strategy]["label"],
-        "note": STRAT_META[req.strategy]["note"],
+        "method": "budget-constrained greedy marginal benefit",
+        "methodLabel": "예산 제약 하 한계효과 최대화",
+        "methodNote": "미해결 통행량을 사업비 1원당 가장 많이 줄이는 지점을 순차 선택합니다.",
+        # 요청에 없었으면 null = 화성시 전체 (docs/API.md §3.7)
+        "region": req.region or None,
+        "strategy": strategy,
+        "strategyLabel": STRAT_META[strategy]["label"],
+        "strategyNote": STRAT_META[strategy]["note"],
+        "note": STRAT_META[strategy]["note"],
+        "strategies": [{"id": k, "label": v["label"], "note": v["note"]}
+                       for k, v in STRAT_META.items()
+                       if not (req.region and k == "balance")],
         "budgetKrw": req.budgetKrw,
         "usedKrw": total_krw,
         "remainingKrw": req.budgetKrw - total_krw,
         "placements": items,
+        "producedBy": {
+            "placements": "최적화 알고리즘 (예산 제약 하 그리디)",
+            "narrative": "Claude",
+            "deterministic": True,
+            "deterministicNote": "같은 조건이면 항상 같은 결과가 나옵니다. "
+                                 "다른 안이 필요하면 난수가 아니라 전략(목적)을 바꿉니다.",
+        },
+        "summary": {
+            "count": len(items),
+            "totalKrw": total_krw,
+            "budgetKrw": req.budgetKrw,
+            "budgetUsedPct": round(total_krw / req.budgetKrw * 100, 1) if req.budgetKrw else 0.0,
+            "expectedResolvedCells": resolved_cells,
+            "expectedResolvedTrips": resolved_trips,
+            "krwPerTrip": int(total_krw / resolved_trips) if resolved_trips > 0 else None,
+            "stoppedBecause": stopped,
+            "costCompareBasis": "total",
+            "costCompareLabel": "총사업비 기준",
+            "costCompareNote": "예산 한도와 같은 기준(총사업비)으로 비교했습니다. "
+                               "똑버스·증편은 이듬해에도 같은 예산이 필요합니다.",
+        },
         "simulation": sim_resp,
     }
 
     if req.includeAlternatives:
         alts = []
         for s in ["efficiency", "equity", "balance", "quick"]:
-            if s == req.strategy:
+            if s == strategy or (req.region and s == "balance"):
                 continue
             alt_types = ["stop"] if s == "quick" else list(req.allowedTypes)
             try:
-                ap, _ = _greedy(sim, s, req.budgetKrw, req.maxPlacements, alt_types, region_ids)
+                ap, _, _st = _greedy(sim, s, req.budgetKrw, req.maxPlacements, alt_types, region_ids)
                 alts.append({
                     "strategy": s, "label": STRAT_META[s]["label"],
                     "count": len(ap), "totalKrw": sum(p["cost"] for p in ap),
