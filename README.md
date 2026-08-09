@@ -33,11 +33,12 @@
 │   ├── 03_join.py              정류장·승하차·노선 → 격자      ✅ 완료
 │   ├── 04_model.py             D·S·MI·4분면·우선순위         ✅ 완료
 │   ├── 05_simulate.py          배치 시뮬레이션·그리디 추천    ✅ 완료
-│   ├── 06_load.py              프론트 계약 JSON 산출         ✅ 완료
+│   ├── 05_load.py              프론트 계약 JSON 산출         ✅ 완료
 │   └── check_api.py            공공데이터 API 키 검증
 ├── server/                     API 서버 (담당 B)
+│   ├── main.py                 FastAPI 10개 엔드포인트       ✅ 완료
+│   ├── static/                 ★ 계약 JSON (05_load.py 산출)
 │   └── schema_ops.sql          PostgreSQL 운영 스키마
-├── data/                       ★ 프론트 계약 JSON (06_load.py 산출, 2.2MB)
 ├── dataset_hwaseong/           화성시 데이터 + 파이프라인 산출물 (26.3MB)
 └── .env.example                환경변수 템플릿
 ```
@@ -119,8 +120,7 @@ python analysis/check_api.py
 | **`03_join.py` 격자 조인** | ✅ **완료.** 승차 배분 100% 보존 · 심야 운행 출근의 9% |
 | **`04_model.py` 모델 산출** | ✅ **완료.** D·S·MI·4분면·우선순위 — need 49/40/48/85 (am/day/pm/night) · 야간 무공급 구제 포함 |
 | **`05_simulate.py` 시뮬레이션** | ✅ 완료 (팀원) · 절대 가드 동기화 |
-| **`05_load.py` JSON 산출** | ✅ **완료.** server/static/ 9파일 · 2866 정류장·140 노선·프로파일 |
-| **`06_load.py` JSON 산출** | ✅ **완료.** 프론트 계약 11개 파일 2.2MB · DB 없이 동작 |
+| **`05_load.py` JSON 산출** | ✅ **완료.** `server/static/` 13파일 · DB 없이 동작 · `/data` 로도 서빙 |
 | 검증 (R² · 정성) | ⬜ 남음 |
 | **API 서버 (`server/main.py`)** | ✅ **완료.** FastAPI 9개 엔드포인트 · 시뮬/추천/보고서 |
 
