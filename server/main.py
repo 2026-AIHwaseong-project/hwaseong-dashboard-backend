@@ -622,13 +622,62 @@ def get_providers():
     return {"providers": result}
 
 
-def _detect_provider() -> str:
-    """환경변수를 확인해 사용 가능한 첫 번째 프로바이더 반환."""
+def _detect_provider():
+    """환경변수를 확인해 사용 가능한 첫 번째 프로바이더 반환. 하나도 없으면 None."""
     import os
     for name, cfg in _PROVIDERS.items():
         if os.environ.get(cfg["env"]):
             return name
-    return "claude"  # 키 없으면 claude로 시도 (오류 메시지가 명확함)
+    return None
+
+
+def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
+    """AI 키가 없을 때 쓰는 규칙 기반 초안.
+
+    「AI 보고서 생성」 버튼이 깨지지 않게 하려는 것이다. 서버를 만든 첫 번째 이유가
+    이 버튼인데(기획서 §7), 발표장에서 키가 안 먹거나 호출이 실패하면 그대로 멎는다.
+    정적 JSON 폴백(05_load.py)과 같은 원리로 마지막 방어선을 하나 둔다.
+
+    ⚠️ 문장을 지어내지 않는다. 산출된 수치를 그대로 문장 틀에 끼울 뿐이고,
+       응답에 isAiGenerated: false 를 실어 화면이 구분할 수 있게 한다.
+    """
+    pn, ph = PERIOD_NAME[period], PERIOD_HOURS[period]
+    need, total = kpi.get("needCells", 0), kpi.get("totalCells", 0)
+    share, trips = kpi.get("needShare", 0), kpi.get("potentialTripsPerDay", 0)
+    eld = kpi.get("elderlyTripsPerDay", 0)
+    top = priorities[:5]
+    return {
+        "title": "화성시 대중교통 수급 불일치 분석 및 노선 조정 검토(안)",
+        "subtitle": f"{pn} 시간대({ph}) 기준",
+        "org": "화성시", "dept": "교통정책과", "period": period,
+        "provider": "규칙 기반 초안 (AI 미사용)", "model": None,
+        "isAiGenerated": False,
+        "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "sections": [
+            {"key": "summary", "heading": "1. 검토 개요",
+             "body": f"{pn} 시간대({ph}) 기준으로 화성시 {total}개 격자를 분석한 결과, "
+                     f"수요 대비 공급이 부족한 격자가 {need}개({share}%)로 나타났다. "
+                     f"해당 격자의 잠재 통행량은 일 {trips:,}통행이며 이 중 고령층 추정은 "
+                     f"{eld:,}통행이다.",
+             "bullets": [f"분석 격자 {total}개 (1km 단위)",
+                         f"고수요·저공급 {need}개 ({share}%)",
+                         f"사각지대 잠재수요 일 {trips:,}통행"]},
+            {"key": "priority", "heading": "2. 우선 조치 대상",
+             "body": "우선순위는 미스매칭 지수에 수요 규모와 고령 인구 비중을 가중해 산출했다.",
+             "bullets": [f"{i}순위 {p.get('name', '')} — {p.get('actionLabel', '')}"
+                         f" (수요 {p.get('demand')} / 공급 {p.get('supply')})"
+                         for i, p in enumerate(top, 1)]},
+        ],
+        "tables": [{
+            "key": "priority", "title": "노선 조정 우선순위",
+            "columns": ["순위", "격자", "권역", "수요", "공급", "MI", "조치"],
+            "rows": [[i, p.get("cellId", ""), p.get("name", ""), p.get("demand"),
+                      p.get("supply"), p.get("mi"), p.get("actionLabel", "")]
+                     for i, p in enumerate(top, 1)],
+        }],
+        "disclaimer": "AI 연동이 설정되지 않아 산출 수치를 문장 틀에 채운 규칙 기반 초안입니다. "
+                      "서술 품질이 필요하면 .env 에 API 키를 설정하세요.",
+    }
 
 
 def _call_ai(provider: str, model: str, prompt: str) -> str:
@@ -698,14 +747,28 @@ def draft_report(req: ReportRequest):
     _chk_period(req.period)
 
     provider = _detect_provider() if req.provider == "auto" else req.provider
-    if provider not in _PROVIDERS:
+    if provider is not None and provider not in _PROVIDERS:
         raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
-    model = req.model or _PROVIDERS[provider]["default_model"]
 
     period_name  = PERIOD_NAME[req.period]
     period_hours = PERIOD_HOURS[req.period]
     kpi          = req.context.get("kpi", {})
     priorities   = req.context.get("priorities", [])[:5]
+
+    # 프론트가 context 를 안 보내도 서버가 자기 데이터로 채운다.
+    # 그래야 폴백이 빈 보고서가 되지 않는다.
+    if not kpi:
+        kpi = DATA[f"grid_{req.period}"]["kpi"]
+    if not priorities:
+        pf = STATIC / f"priorities_{req.period}.json"
+        if pf.exists():
+            priorities = json.loads(pf.read_text("utf-8"))["items"][:5]
+
+    # 키가 하나도 없으면 AI 를 시도하지 않고 바로 규칙 기반 초안을 준다.
+    # 500 을 던지면 화면의 「AI 보고서 생성」 버튼이 그냥 깨진다.
+    if provider is None:
+        return _fallback_report(req.period, kpi, priorities)
+    model = req.model or _PROVIDERS[provider]["default_model"]
     sim_ctx      = req.context.get("simulation")
     rec_ctx      = req.context.get("recommendation")
 
@@ -773,7 +836,11 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
             "tables": [],
             "disclaimer": "AI 응답을 JSON으로 파싱하지 못했습니다.",
         }
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(500, f"AI API 오류 ({provider}): {e}")
+        # 패키지 미설치·키 오류·네트워크 장애 어느 쪽이든 보고서는 나가야 한다.
+        # 발표 중에 500 을 띄우느니 규칙 기반 초안을 주고 사유를 함께 적는다.
+        fb = _fallback_report(req.period, kpi, priorities)
+        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+        fb["disclaimer"] = f"AI 호출에 실패해 규칙 기반 초안으로 대체했습니다 ({provider}: {detail}). " \
+                           + fb["disclaimer"]
+        return fb
