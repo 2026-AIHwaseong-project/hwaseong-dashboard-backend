@@ -34,6 +34,7 @@
 │   ├── 04_model.py             D·S·MI·4분면·우선순위         ✅ 완료
 │   ├── 05_simulate.py          배치 시뮬레이션·그리디 추천    ✅ 완료
 │   ├── 05_load.py              프론트 계약 JSON 산출         ✅ 완료
+│   ├── 07_validate.py          회귀·공간CV·정성 검증          ✅ 완료
 │   └── check_api.py            공공데이터 API 키 검증
 ├── server/                     API 서버 (담당 B)
 │   ├── main.py                 FastAPI 10개 엔드포인트       ✅ 완료
@@ -121,7 +122,7 @@ python analysis/check_api.py
 | **`04_model.py` 모델 산출** | ✅ **완료.** D·S·MI·4분면·우선순위 — need 49/40/48/85 (am/day/pm/night) · 야간 무공급 구제 포함 |
 | **`05_simulate.py` 시뮬레이션** | ✅ 완료 (팀원) · 절대 가드 동기화 |
 | **`05_load.py` JSON 산출** | ✅ **완료.** `server/static/` 13파일 · DB 없이 동작 · `/data` 로도 서빙 |
-| 검증 (R² · 정성) | ⬜ 남음 |
+| **검증 (`07_validate.py`)** | ✅ **완료.** 홀드아웃 로그 R² **0.801** (목표 0.6) · 배차 탄력성 +0.431 |
 | **API 서버 (`server/main.py`)** | ✅ **완료.** FastAPI 9개 엔드포인트 · 시뮬/추천/보고서 |
 
 **최대 난관이던 격자 공간조인이 뚫렸습니다.** 검증 근거는

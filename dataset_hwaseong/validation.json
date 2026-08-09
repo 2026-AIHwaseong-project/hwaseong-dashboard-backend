@@ -1,0 +1,178 @@
+{
+ "method": "Poisson 회귀 (log-link), 일 단위. 좌변 board_day 는 실측값",
+ "note": "시간대별 승차는 유동인구 배율로 안분한 추정치라 시간대 회귀는 잠재수요와 같은 배율을 공유해 순환이 된다. 그래서 일 단위로 검증한다.",
+ "n_grids": 786,
+ "n_regions": 29,
+ "features": [
+  "log_pop",
+  "log_freq",
+  "coverage",
+  "log_workers",
+  "elderly_ratio",
+  "log_rail"
+ ],
+ "coefficients": {
+  "log_pop": 0.5033,
+  "log_freq": 0.4306,
+  "coverage": 0.5168,
+  "log_workers": 0.2975,
+  "elderly_ratio": 0.708,
+  "log_rail": -0.2621
+ },
+ "freqElasticity": 0.4306,
+ "r2": {
+  "train_raw": 0.79,
+  "train_log": 0.7999,
+  "cv_raw": 0.7318,
+  "cv_log": 0.8006
+ },
+ "cvMethod": "GroupKFold(5) by 읍면동 — 무작위 분할은 이웃 격자가 섞여 부풀려진다",
+ "worstRegions": [
+  {
+   "region": "양감면",
+   "cells": 34,
+   "r2_log": 0.0522
+  },
+  {
+   "region": "반월동",
+   "cells": 4,
+   "r2_log": 0.083
+  },
+  {
+   "region": "마도면",
+   "cells": 35,
+   "r2_log": 0.094
+  },
+  {
+   "region": "동탄1동",
+   "cells": 5,
+   "r2_log": 0.1195
+  },
+  {
+   "region": "진안동",
+   "cells": 8,
+   "r2_log": 0.2873
+  }
+ ],
+ "target": 0.6,
+ "passed": true,
+ "topPriority": {
+  "am": [
+   {
+    "rank": 1,
+    "region": "새솔동",
+    "gridId": "다사3921",
+    "priority": 2.5441,
+    "action": "ADD_FREQ",
+    "lat": 37.29048,
+    "lon": 126.81744
+   },
+   {
+    "rank": 2,
+    "region": "동탄7동",
+    "gridId": "다사6707",
+    "priority": 2.3291,
+    "action": "NEW_STOP",
+    "lat": 37.16568,
+    "lon": 127.13394
+   },
+   {
+    "rank": 3,
+    "region": "진안동",
+    "gridId": "다사5913",
+    "priority": 2.303,
+    "action": "ADD_FREQ",
+    "lat": 37.21945,
+    "lon": 127.04351
+   },
+   {
+    "rank": 4,
+    "region": "새솔동",
+    "gridId": "다사3920",
+    "priority": 1.9949,
+    "action": "ADD_FREQ",
+    "lat": 37.28146,
+    "lon": 126.81752
+   },
+   {
+    "rank": 5,
+    "region": "봉담읍",
+    "gridId": "다사4813",
+    "priority": 1.9076,
+    "action": "DRT",
+    "lat": 37.21891,
+    "lon": 126.91953
+   }
+  ],
+  "night": [
+   {
+    "rank": 1,
+    "region": "화산동",
+    "gridId": "다사5612",
+    "priority": 3.4893,
+    "action": "DRT",
+    "lat": 37.2103,
+    "lon": 127.00975
+   },
+   {
+    "rank": 2,
+    "region": "진안동",
+    "gridId": "다사5914",
+    "priority": 2.8643,
+    "action": "DRT",
+    "lat": 37.22847,
+    "lon": 127.04345
+   },
+   {
+    "rank": 3,
+    "region": "동탄7동",
+    "gridId": "다사6707",
+    "priority": 2.8586,
+    "action": "DRT",
+    "lat": 37.16568,
+    "lon": 127.13394
+   },
+   {
+    "rank": 4,
+    "region": "진안동",
+    "gridId": "다사6013",
+    "priority": 2.7217,
+    "action": "ADD_FREQ",
+    "lat": 37.2195,
+    "lon": 127.05478
+   },
+   {
+    "rank": 5,
+    "region": "정남면",
+    "gridId": "다사5407",
+    "priority": 2.7174,
+    "action": "DRT",
+    "lat": 37.16514,
+    "lon": 126.98752
+   }
+  ]
+ },
+ "qualitative": [
+  {
+   "region": "새솔동",
+   "rank": "출근 1·4위",
+   "verified": true,
+   "finding": "송산그린시티. 안산 생활권인데 연결 시내버스가 안산 업체 10번 하나뿐. 화성시가 동탄·병점권 위주로 투자해 노선 신설이 지연된다고 보도됨",
+   "source": "경기일보 2018-05-02 / 나무위키 송산그린시티·새솔동"
+  },
+  {
+   "region": "비봉면",
+   "rank": "심야 신규 need",
+   "verified": true,
+   "finding": "비봉지구 마을버스 막차가 22시경 종료. 인구 증가 대비 대중교통 개선 지연",
+   "source": "나무위키 가축수송(교통)/사례/버스/경기도"
+  },
+  {
+   "region": "화산동·정남면",
+   "rank": "심야 1·5위",
+   "verified": false,
+   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 야간 무공급(운행 0회) 격자로 실측되며 화산동 다사5612 는 인구 6,872",
+   "source": null
+  }
+ ]
+}
