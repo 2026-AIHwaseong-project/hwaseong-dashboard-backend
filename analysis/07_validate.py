@@ -113,6 +113,27 @@ for tr, te in gkf.split(X.values, y, groups):
 cv_raw, cv_log = r2(y, oof), r2(np.log1p(y), np.log1p(oof))
 print(f"  홀드아웃 R²  원단위 {cv_raw:.3f} · 로그 {cv_log:.3f}   (목표 ≥ {R2_TARGET})")
 
+# ── 빈 땅을 빼고도 맞히는가 ──────────────────────────────────────────────
+# 786격자 중 인구<50 이 183곳, 승차 0 이 180곳이다. "빈 땅에는 사람이 안 탄다"
+# 를 맞히는 몫이 전체 R² 를 떠받친다. 실제 승차가 일어나는 격자만 놓고도
+# 목표를 넘는지 봐야 한다 — 넘는다면 그게 더 정직하면서 더 강한 주장이다.
+# (예측은 위 oof 를 그대로 쓴다. 부분집합마다 다시 학습하면 표본이 줄어
+#  홀드아웃 조건이 달라져 비교가 안 된다.)
+pop_v = day["pop"].values
+subsets = {}
+print("\n  실제 승차가 일어나는 격자만 (같은 홀드아웃 예측을 부분집합으로 평가)")
+for th in (0, 50, 200):
+    m = pop_v >= th
+    s_log, s_raw = r2(np.log1p(y[m]), np.log1p(oof[m])), r2(y[m], oof[m])
+    frac = y[m].sum() / y.sum()
+    subsets[f"pop_ge_{th}"] = {"n": int(m.sum()), "boardingShare": round(float(frac), 4),
+                               "cv_log": round(s_log, 4), "cv_raw": round(s_raw, 4)}
+    print(f"    인구≥{th:>3}  {m.sum():>3}칸 (승차의 {frac:5.1%})  "
+          f"로그 R² {s_log:+.3f} · 원단위 {s_raw:+.3f}")
+HEADLINE = subsets["pop_ge_200"]
+print(f"\n  ▶ 인용 권장: 승차의 {HEADLINE['boardingShare']:.1%} 가 일어나는 "
+      f"{HEADLINE['n']}격자에서 로그 R² {HEADLINE['cv_log']:.3f}")
+
 # 읍면동 하나씩 완전히 빼는 버전 — 가장 보수적
 worst = []
 for reg in sorted(set(groups)):
@@ -131,12 +152,20 @@ for r_, n, v in worst[-3:]:
 
 print("=" * 64)
 print("[3] 우선순위 Top 5 — 정성 대조용 (실제 민원·언론과 비교할 목록)")
+QUAL_PERIODS = ["am", "night"]
+TOP_N = 5
 qual = {}
-for p in ["am", "night"]:
-    top = gm[(gm.period == p) & (gm.priority > 0)].nlargest(5, "priority")
-    print(f"\n  [{p}]")
+rank_of = {}          # (period, region) -> (최고순위, need격자수) — [3-1] 이 쓴다
+for p in QUAL_PERIODS:
+    need = (gm[(gm.period == p) & (gm.priority > 0)]
+            .sort_values("priority", ascending=False).reset_index(drop=True))
+    for i, r in enumerate(need.itertuples(), 1):
+        key = (p, r.region)
+        if key not in rank_of:
+            rank_of[key] = (i, len(need))
+    print(f"\n  [{p}]  need 격자 {len(need)}곳")
     rows = []
-    for i, r in enumerate(top.itertuples(), 1):
+    for i, r in enumerate(need.head(TOP_N).itertuples(), 1):
         print(f"    {i}. {r.region:8} ({r.grid_id})  점수 {r.priority:5.2f}"
               f"  MI {r.mi:+.2f}  고령 {r.elderly_ratio:5.1%}  {r.action}"
               f"  ({r.lat:.4f}, {r.lon:.4f})")
@@ -148,29 +177,63 @@ for p in ["am", "night"]:
 # 언론·위키에서 실제로 확인한 것만 적는다. 못 찾은 건 못 찾았다고 둔다.
 # 발표에서 "모델이 찍은 곳이 실제로 문제인 곳" 을 말할 때 근거가 되는 부분이라
 # 추정을 섞으면 안 된다.
+#
+# ⚠️ 순위는 **적지 않는다**. 예전에는 "출근 1·4위" 처럼 손으로 적어 뒀는데,
+#    노선 커버리지를 보강(140→200)하자 새솔동이 need 에서 빠졌는데도 문구는
+#    "출근 1·4위 ✅" 로 남아 있었다. 검증이 모델을 따라오지 못하면 발표장에서
+#    심사위원이 화면을 열어 대조하는 순간 근거가 무너진다.
+#    그래서 순위는 아래에서 **매 실행마다 현재 산출물에서 계산**한다.
 QUALITATIVE = [
-    {"region": "새솔동", "rank": "출근 1·4위", "verified": True,
+    {"region": "새솔동", "verified": True,
      "finding": "송산그린시티. 안산 생활권인데 연결 시내버스가 안산 업체 10번 하나뿐. "
                 "화성시가 동탄·병점권 위주로 투자해 노선 신설이 지연된다고 보도됨",
      "source": "경기일보 2018-05-02 / 나무위키 송산그린시티·새솔동"},
-    {"region": "비봉면", "rank": "심야 신규 need", "verified": True,
+    {"region": "비봉면", "verified": True,
      "finding": "비봉지구 마을버스 막차가 22시경 종료. 인구 증가 대비 대중교통 개선 지연",
      "source": "나무위키 가축수송(교통)/사례/버스/경기도"},
-    {"region": "화산동·정남면", "rank": "심야 1·5위", "verified": False,
+    {"region": "화산동", "verified": False,
      "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. "
-                "다만 야간 무공급(운행 0회) 격자로 실측되며 화산동 다사5612 는 인구 6,872",
+                "다만 야간 무공급(운행 0회) 격자로 실측된다",
+     "source": None},
+    {"region": "정남면", "verified": False,
+     "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함",
      "source": None},
 ]
 
+
+def rank_str(region):
+    """이 읍면동이 지금 어디쯤인지 — 매 실행마다 산출물에서 직접 읽는다."""
+    parts = []
+    for p in QUAL_PERIODS:
+        if (p, region) in rank_of:
+            rk, n = rank_of[(p, region)]
+            parts.append(f"{p} {rk}/{n}위")
+        else:
+            parts.append(f"{p} need 아님")
+    return " · ".join(parts)
+
+
 print("=" * 64)
-print("[3-1] 정성 대조 — 공개 자료에서 확인된 것")
-# ⚠️ QUALITATIVE 의 순위 표기("출근 1·4위" 등)는 1km 격자에서 확인한 기록이다.
-#    격자 크기를 바꿔 재실행하면 위 [3] Top5 와 대조해 순위 표기를 갱신할 것.
+print("[3-1] 정성 대조 — 공개 자료 근거 vs **현재** 우선순위")
 for q in QUALITATIVE:
-    print(f"  {'✅' if q['verified'] else '⬜'} {q['region']:12} ({q['rank']})")
+    q["currentRank"] = rank_str(q["region"])
+    q["inTop5"] = any(q["region"] in [r["region"] for r in qual[p]] for p in QUAL_PERIODS)
+    mark = "✅" if q["verified"] else "⬜"
+    top = "★Top5" if q["inTop5"] else "     "
+    print(f"  {mark} {top} {q['region']:8} — {q['currentRank']}")
     print(f"       {q['finding']}")
-hit = sum(q["verified"] for q in QUALITATIVE)
-print(f"\n  확인 {hit}/{len(QUALITATIVE)}건 — 목표는 Top5 중 3곳 이상 일치")
+
+# 발표에서 쓸 수 있는 건 '근거가 있고 + 지금도 상위' 인 것뿐이다. 둘 다여야 한다.
+usable = [q for q in QUALITATIVE if q["verified"] and q["inTop5"]]
+verified_n = sum(q["verified"] for q in QUALITATIVE)
+print(f"\n  공개근거 확보 {verified_n}/{len(QUALITATIVE)}건 · "
+      f"그중 현재 Top{TOP_N} 에도 드는 것 **{len(usable)}건** (목표 3건)")
+if len(usable) < 3:
+    print(f"  ⚠️ 발표에서 '모델이 찍은 곳이 실제 문제인 곳' 이라고 말할 근거가 부족하다.")
+    print(f"     현재 Top5 읍면동에 대한 공개자료 조사를 추가해야 한다:")
+    for p in QUAL_PERIODS:
+        regs = sorted({r["region"] for r in qual[p]})
+        print(f"       [{p}] {', '.join(regs)}")
 
 print("=" * 64)
 print("[4] 저장 · 판정")
@@ -196,6 +259,12 @@ out = {
     "freqElasticity": round(float(elast), 4),
     "r2": {"train_raw": round(r2_raw, 4), "train_log": round(r2_log, 4),
            "cv_raw": round(cv_raw, 4), "cv_log": round(cv_log, 4)},
+    "r2BySubset": subsets,
+    "headline": {"scope": f"인구≥200 격자 {HEADLINE['n']}칸 "
+                          f"(실측 승차의 {HEADLINE['boardingShare']:.1%})",
+                 "cv_log": HEADLINE["cv_log"], "cv_raw": HEADLINE["cv_raw"]},
+    "demandBasis": "초승(환승 제외) · 평일 일평균 — 03_join.py [4][5]",
+    "qualitativeUsable": len(usable),
     "cvMethod": "GroupKFold(5) by 읍면동 — 무작위 분할은 이웃 격자가 섞여 부풀려진다",
     "worstRegions": [{"region": r_, "cells": n, "r2_log": round(v, 4)} for r_, n, v in worst[:5]],
     "target": R2_TARGET, "passed": bool(cv_log >= R2_TARGET),
@@ -207,9 +276,11 @@ print(f"  -> dataset_hwaseong/validation.json")
 
 # 홀드아웃이 학습을 크게 웃돌면 누수를 의심해야 한다. 다만 Poisson 은 원단위
 # deviance 를 최적화하는데 여기서는 로그 스케일로 R² 를 재므로 둘의 순서가
-# 보장되지 않는다. 실측 학습 0.800 대 홀드아웃 0.801 로 사실상 동률이고,
-# 원단위는 0.790 → 0.732 로 정상 순서다. 과적합이 거의 없다는 뜻이라
-# 허용오차를 두고, 눈에 띄게 뒤집힐 때만 잡는다.
+# 보장되지 않는다. 그래서 로그 쪽은 허용오차를 두고 눈에 띄게 뒤집힐 때만 잡는다.
+#
+# 2026-08-12 실측(초승·평일 기준): 로그 학습 0.846 → 홀드아웃 0.838,
+# 원단위 학습 0.928 → 홀드아웃 0.874 로 둘 다 정상 순서다. 과적합이 거의 없다.
+# (환승 포함·119일 혼합이던 이전 값은 로그 0.847→0.842, 원단위 0.854→0.801)
 assert cv_log <= r2_log + 0.05, \
     f"홀드아웃({cv_log:.3f})이 학습({r2_log:.3f})을 크게 웃돕니다 — 누수 의심"
 assert cv_raw < r2_raw + 1e-9, f"원단위 홀드아웃({cv_raw:.3f})이 학습({r2_raw:.3f}) 이상 — 누수 의심"

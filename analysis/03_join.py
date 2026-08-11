@@ -4,7 +4,7 @@
     python analysis/03_join.py
 
 산출 (dataset_hwaseong/)
-    stops_hwaseong.csv   정류장 마스터 + 일평균 승하차 + 노선수 + 시간대별 운행빈도
+    stops_hwaseong.csv   정류장 마스터 + 평일 일평균 승하차(초승 기준) + 노선수 + 시간대별 운행빈도
     grid_join.csv        격자 × 4시간대 — D·S 의 원재료
 
 04_model.py 가 이걸 받아 D·S·MI·4분면·우선순위를 만듭니다.
@@ -33,12 +33,28 @@
     오는데(승차량 합계 120만) 노선 정보가 없을 뿐이다. 0 으로 넣으면
     거짓 사각지대가 728개 생긴다. 마을버스 원본에는 경유정류소가 없어
     직접 메울 수 없으므로, 같은 읍면동 중앙값으로 대체하고 그 사실을 센다.
+
+[4] 수요는 `초승` 만 센다. `승차합계` 가 아니다. (2026-08-12 수정)
+    승차합계 20,258,919 = 초승 16,504,918(81.5%) + 환승 3,754,001(18.5%).
+    환승은 새로 발생한 통행이 아니라 이미 버스에 탄 사람이 갈아탄 것이다.
+    이걸 수요로 세면 철도 연계 격자의 D 가 통째로 부풀고, MI 가 따라 부풀어
+    추천이 그쪽으로 쏠린다. 실제로 환승비가 병점역후문 71.2% · 어천역 77.1% ·
+    야목역 81.7% 이고, 환승비 30% 이상인 66개 정류장이 전체 승차의 21.1% 다.
+    "버스를 갈아타는 곳"과 "사람이 버스를 타기 시작하는 곳"은 다른 문제다.
+
+[5] 일평균은 **평일** 기준이다. 119일 통짜 평균이 아니다. (2026-08-12 수정)
+    주말 승차는 평일의 68.3% 이고, 그 비율이 정류장마다 크게 다르다 —
+    반월중·고등학교앞 0.06 부터 석포산업단지 3.59 까지 약 60배다.
+    119일을 통으로 평균내면 평일 기준 대비 중앙 -10.7%(범위 -25%~+47%)로
+    어긋난다. am(07-09)·pm(17-19) 은 통근 시간대라 평일이 맞는 자다.
+    주말분은 `board_day_we` 로 따로 남긴다 — 요일축을 도입할 때 쓴다.
 """
 import csv
 import json
 import math
 import sys
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 from pyproj import Transformer
@@ -104,6 +120,14 @@ def hhmm(v):
     return h * 60 + m if 0 <= h <= 30 and m < 60 else None
 
 
+def is_weekend(v):
+    """'20251201' → 토·일이면 True. 읽을 수 없는 값은 평일로 본다 [5]."""
+    s = str(v or "").strip()
+    if len(s) != 8 or not s.isdigit():
+        return False
+    return date(int(s[:4]), int(s[4:6]), int(s[6:])).weekday() >= 5
+
+
 print("=" * 66)
 print("[1] 정류장 마스터 (국토부) + 승하차 결합")
 stops = {}
@@ -115,7 +139,9 @@ for s in read("stops_national_hwaseong.csv"):
     x, y = to5179(lon, lat)
     stops[k] = {"key": k, "ars": ars(s["모바일단축번호"]), "name": s["정류장명"],
                 "lon": round(lon, 6), "lat": round(lat, 6), "x": x, "y": y,
-                "board": 0.0, "alight": 0.0, "days": set()}
+                # 평일(wd)·주말(we) 을 따로 쌓는다 [5]. days 는 집계일수 세기용.
+                "board_wd": 0.0, "alight_wd": 0.0, "days_wd": set(),
+                "board_we": 0.0, "alight_we": 0.0, "days_we": set()}
 print(f"  좌표 있는 정류장 {len(stops):,}개")
 
 hit = miss = 0
@@ -125,16 +151,24 @@ for b in read("boarding_hwaseong.csv"):
         miss += 1
         continue
     hit += 1
-    s["board"] += num(b["승차합계"])
-    s["alight"] += num(b["하차"])
-    s["days"].add(b["승하차일자"])
+    d = b["승하차일자"]
+    sfx = "we" if is_weekend(d) else "wd"
+    s["board_" + sfx] += num(b["초승"])       # [4] 환승 제외 — 초승만이 새 통행이다
+    s["alight_" + sfx] += num(b["하차"])
+    s["days_" + sfx].add(d)
 print(f"  승하차 {hit:,}행 결합 / 미매칭 {miss:,}행 ({hit / (hit + miss):.1%})")
 
-n_days = len({d for s in stops.values() for d in s["days"]}) or 1
+# [5] 평일과 주말은 자가 다르다. 일수도 따로 세야 한다.
+n_wd = len({d for s in stops.values() for d in s["days_wd"]}) or 1
+n_we = len({d for s in stops.values() for d in s["days_we"]}) or 1
 for s in stops.values():
-    s["board_day"] = round(s["board"] / n_days, 2)     # 일평균으로 환산
-    s["alight_day"] = round(s["alight"] / n_days, 2)
-print(f"  집계 기간 {n_days}일 → 일평균 환산")
+    s["board_day"] = round(s["board_wd"] / n_wd, 2)      # 기준값 = 평일 일평균
+    s["alight_day"] = round(s["alight_wd"] / n_wd, 2)
+    s["board_day_we"] = round(s["board_we"] / n_we, 2)   # 요일축 도입 대비 보관
+print(f"  집계 기간 평일 {n_wd}일 · 주말 {n_we}일 → **평일** 일평균 기준 [5]")
+_bwd = sum(s["board_wd"] for s in stops.values()) / n_wd
+_bwe = sum(s["board_we"] for s in stops.values()) / n_we
+print(f"  초승 일평균  평일 {_bwd:>9,.0f} · 주말 {_bwe:>9,.0f}  (주말/평일 {_bwe / max(_bwd, 1):.3f})")
 
 print("=" * 66)
 print("[2] 노선 → 정류장 운행빈도 (시간대별)")
@@ -360,7 +394,8 @@ print("=" * 66)
 print("[5] 저장")
 with open(D / "stops_hwaseong.csv", "w", encoding="utf-8-sig", newline="") as f:
     cols = ["key", "stop_id", "ars", "name", "lon", "lat", "grid_id", "region",
-            "board_day", "alight_day", "n_routes", "freq_imputed"] + [f"freq_{p}" for p, _, _ in PERIODS]
+            "board_day", "board_day_we", "alight_day",
+            "n_routes", "freq_imputed"] + [f"freq_{p}" for p, _, _ in PERIODS]
     w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for s in slist:
