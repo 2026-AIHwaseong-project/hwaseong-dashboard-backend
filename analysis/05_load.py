@@ -5,8 +5,8 @@
     python analysis/05_load.py
 
 입력 (dataset_hwaseong/)
-    grid_hwaseong.csv    격자 마스터 (786개)
-    grid_metrics.csv     격자 × 시간대 (786×4)
+    grid_hwaseong.csv    격자 마스터 (셀 수는 grid_spec.json 참조)
+    grid_metrics.csv     격자 × 시간대 (셀 수 × 4)
     grid_join.csv        격자 × 시간대 원재료
     stops_hwaseong.csv   화성시 정류장
     routes.csv           노선 목록
@@ -106,11 +106,38 @@ def write_json(path, obj):
 print("데이터 읽는 중...")
 
 gh    = pd.read_csv(D_DIR / "grid_hwaseong.csv")
+
+# 격자 스펙 (02_grid 사이드카). 없으면 1km 초기 산출물로 간주합니다.
+# 스펙이 있으면 cellCount 를 CSV 와 대조합니다 — 02_grid 가 중간에 실패해
+# CSV 와 스펙이 갈라진 상태로 하류가 도는 것을 여기서 막습니다.
+try:
+    _spec = json.loads((D_DIR / "grid_spec.json").read_text(encoding="utf-8"))
+    GRID_SIZE_M = int(_spec["sizeMeters"])
+    if int(_spec.get("cellCount", len(gh))) != len(gh):
+        sys.exit(f"grid_spec.json({_spec['cellCount']}칸)과 grid_hwaseong.csv({len(gh)}칸)가 "
+                 "다릅니다 — 02_grid.py 를 다시 실행하세요.")
+    print(f"격자 스펙: {GRID_SIZE_M}m · {len(gh)}칸 (grid_spec.json)")
+except FileNotFoundError:
+    GRID_SIZE_M = 1000
+    print("격자 스펙 없음 — 1km 초기 산출물로 간주합니다.")
+except (KeyError, ValueError, TypeError) as e:
+    sys.exit(f"grid_spec.json 이 손상됐습니다({e}) — 02_grid.py 를 다시 실행하세요.")
 gm    = pd.read_csv(D_DIR / "grid_metrics.csv")
 gj    = pd.read_csv(D_DIR / "grid_join.csv")
 stops = pd.read_csv(D_DIR / "stops_hwaseong.csv")
-routes_df = pd.read_csv(D_DIR / "routes.csv")
-rs    = pd.read_csv(D_DIR / "route_stops.csv")
+def _plus(name):
+    """09_augment_routes 가 만든 보강본이 있으면 그걸 읽는다 (03_join 과 동일 규칙).
+       화성 면허가 아니라 빠졌던 노선을 채운 파일이다. 없으면 원본으로 돌아간다."""
+    stem, ext = name.rsplit(".", 1)
+    p = D_DIR / f"{stem}_plus.{ext}"
+    if p.exists():
+        print(f"  [보강] {p.name} 사용")
+        return pd.read_csv(p)
+    return pd.read_csv(D_DIR / name)
+
+
+routes_df = _plus("routes.csv")
+rs    = _plus("route_stops.csv")
 boarding = pd.read_csv(D_DIR / "boarding_hwaseong.csv")
 flow  = pd.read_csv(D_DIR / "flow_hourly.csv")
 
@@ -243,6 +270,9 @@ for _, row in stops.iterrows():
         "lat":    safe_float(row["lat"], 6),
         "kind":   kind,
         "routes": routes_list,
+        # 지도에서 점 크기를 이 값에 비례시킨다. 전부 같은 크기로 그리면
+        # 병점역과 시골 정류장이 똑같이 보여서 2,866개가 격자 색을 덮는다.
+        "boardingsPerDay": safe_float(row["board_day"], 1),
     })
 
 write_json(STATIC_DIR / "stops.json", {"stops": stops_out})
@@ -269,6 +299,58 @@ for _, row in routes_df.iterrows():
 
 write_json(STATIC_DIR / "routes.json", {"routes": routes_out})
 print(f"  routes.json: {len(routes_out)}개 노선")
+
+# ── 7-1. 격자 표시 이름 — 읍면동 안에서 방위로 세분 ──────────────────────────
+#
+# 예전에는 봉담읍 45칸이 전부 이름이 "봉담읍" 이라 지도·표·보고서에서 어느 칸인지
+# 구분이 안 됐다. "봉담읍 북부" 처럼 방위를 붙이면 사람이 바로 짚을 수 있다.
+#
+# 왜 리(里) 가 아니라 방위인가
+#   봉담읍은 읍이라 아래가 동이 아니라 리다("봉담 몇동"은 존재하지 않는다).
+#   법정리 경계(BML_BADM_AS 194건)는 우리가 갖고 있지만 좌표가 없어 못 쓴다.
+#   무엇보다 사람은 "동화리"가 어딘지 몰라도 "봉담읍 북부"는 지도에서 바로 찾는다.
+#
+# 칸이 적은 읍면동까지 쪼개면 오히려 장황해지므로 크기에 따라 단계를 둔다.
+print("격자 표시 이름 생성 중...")
+
+DIR8 = ["동", "북동", "북", "북서", "서", "남서", "남", "남동"]
+
+
+def _build_cell_names(gh_df):
+    """grid_id → 표시 이름. 읍면동 중심 기준 방위로 세분한다."""
+    names = {}
+    for region, sub in gh_df.groupby("region"):
+        n = len(sub)
+        if n <= 4:                       # 작은 동은 그대로 (동탄1동 5칸 등)
+            for gid in sub["grid_id"]:
+                names[gid] = region
+            continue
+        bins = 4 if n <= 20 else 8       # 클수록 잘게. 8방위면 106칸도 칸당 13개꼴
+        cx, cy = sub["x_5179"].mean(), sub["y_5179"].mean()
+        # 중심부 판정 반경 — 그 동 격자들의 중심거리 중앙값의 절반
+        d = np.hypot(sub["x_5179"] - cx, sub["y_5179"] - cy)
+        r_core = float(d.median()) * 0.5
+        for gid, x, y in zip(sub["grid_id"], sub["x_5179"], sub["y_5179"]):
+            dx, dy = x - cx, y - cy
+            if math.hypot(dx, dy) <= r_core:
+                names[gid] = region + " 중심"
+                continue
+            ang = math.degrees(math.atan2(dy, dx)) % 360
+            if bins == 4:
+                lab = ["동부", "북부", "서부", "남부"][int((ang + 45) % 360 // 90)]
+            else:
+                lab = DIR8[int((ang + 22.5) % 360 // 45)] + "부"
+            names[gid] = region + " " + lab
+    return names
+
+# 이름을 유일하게 만들려고 격자번호를 붙여봤다가 뺐다. 화면이 이미 이름 옆에
+# 격자 ID 를 따로 보여주고 있어서 "다사4813 | 봉담읍 북서부 4813" 처럼 번호가
+# 두 번 나왔다. 유일성은 ID 가 담당하고 이름은 위치를 읽는 용도로 둔다.
+
+
+CELL_NAME = _build_cell_names(gh)
+_uniq = len(set(CELL_NAME.values()))
+print(f"  {len(CELL_NAME):,}격자 → 표시 이름 {_uniq}종 (읍면동 {gh['region'].nunique()}개)")
 
 # ── 8. grid_*.json (4개) ─────────────────────────────────────────────────────
 print("grid_*.json 생성 중...")
@@ -318,7 +400,7 @@ for period in PERIODS:
 
         cells.append({
             "id":            gid,
-            "name":          str(r_gm["region"]),
+            "name":          CELL_NAME.get(gid, str(r_gm["region"])),
             "region":        str(r_gm["region"]),
             "regionCode":    str(int(r_gm["region_code"])),
             "regionKind":    str(r_gm["region_kind"]),
@@ -500,10 +582,12 @@ meta = {
         {"id": "night", "name": "심야", "label": "22–24", "hours": [22, 24]},
     ],
     "grid": {
-        "sizeMeters":        1000,
-        "analysisCellCount": 786,
-        "displaySizeMeters": 1500,
-        "cellCount":         786,
+        # 격자 크기는 02_grid 가 남긴 grid_spec.json 에서 읽습니다 (하드코딩 금지 —
+        # 500m 전환 시 여기와 프론트 표기가 같이 틀어지던 것을 막습니다).
+        "sizeMeters":        GRID_SIZE_M,
+        "analysisCellCount": int(len(gh)),
+        "displaySizeMeters": GRID_SIZE_M,
+        "cellCount":         int(len(gh)),
         "crs":               "EPSG:4326",
         "bbox": [
             round(lon_min, 6), round(lat_min, 6),
@@ -665,7 +749,8 @@ for period in PERIODS:
     for rank, (_, r) in enumerate(top.iterrows(), 1):
         act = str(r["action"])
         items.append({
-            "rank": rank, "cellId": str(r["grid_id"]), "name": str(r["region"]),
+            "rank": rank, "cellId": str(r["grid_id"]),
+            "name": CELL_NAME.get(str(r["grid_id"]), str(r["region"])),
             "mi": round(safe_float(r["mi"]), 3),
             "priorityScore": round(safe_float(r["priority"]), 4),
             "demand": int(round(safe_float(r["D"]) * 100)),

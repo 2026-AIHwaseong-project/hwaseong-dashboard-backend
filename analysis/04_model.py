@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-D · S · MI · 4분면 · 우선순위 산출 — 786격자 × 4시간대
+D · S · MI · 4분면 · 우선순위 산출 — 전 격자 × 4시간대
 
     python analysis/04_model.py
 
@@ -13,8 +13,12 @@ D · S · MI · 4분면 · 우선순위 산출 — 786격자 × 4시간대
     norm_stats.json      정규화 기준통계. 05_simulate.py 는 이 값을 고정 사용한다.
                          (배치 전후를 같은 자로 재기 위해 재계산 금지)
 
+⚠️ 격자 크기를 바꾸면(예: 500m 전환) 아래 [1]~[8] 의 측정 근거는 전부
+   1km·786격자 기준 기록이 된다. 컷·감쇠·가드 값 자체는 그대로 돌아가지만
+   분포가 달라지므로 docs/GRID-500M.md 의 재튜닝 점검 목록을 따라 재검증할 것.
+
 ---
-수식 설계 결정 (전부 786격자 실데이터로 측정·확인한 것)
+수식 설계 결정 (전부 1km 786격자 실데이터로 측정·확인한 것)
 
 [1] 정규화: log1p 후 P3~P97 클램프 min-max (보간 없는 lower pctl).
     승차량 왜도 6.5, 최대/P99=2.7 → minmax 쓰면 82%가 1점 미만에 뭉개짐.
@@ -101,11 +105,11 @@ def main():
     # coverage 600m 재산정 [2]
     gj["cov600"] = np.clip(1.0 - gj["nearest_stop_m"] / COV_THRESHOLD_M, 0.05, 1.0)
 
-    # 인구가중 (시간대 불변): log1p P3~P97 min-max, 786격자 기준 1회
-    pop786 = gh.set_index("grid_id")["pop"].astype(float)
-    lp = np.log1p(pop786.values)
+    # 인구가중 (시간대 불변): log1p P3~P97 min-max, 전 격자 기준 1회
+    pop_all = gh.set_index("grid_id")["pop"].astype(float)
+    lp = np.log1p(pop_all.values)
     loP, hiP = pctl(lp, 0.03), pctl(lp, 0.97)
-    popW = pd.Series(np.clip((lp - loP) / max(hiP - loP, 1e-9), 0, 1), index=pop786.index)
+    popW = pd.Series(np.clip((lp - loP) / max(hiP - loP, 1e-9), 0, 1), index=pop_all.index)
 
     norm_stats = {"periods": {}, "constants": {
         "alphaD": ALPHA_D, "wFreq": W_FREQ, "wCov": W_COV, "dampExp": DAMP_EXP,
@@ -138,6 +142,13 @@ def main():
         zS = (S - K["mS"]) / K["sS"]
         K["dRef"] = pctl(D, 0.55) + 1e-9
         K["fRef"] = pctl(nf, QUAD["fref_q"])
+        # 격자를 세분화하면 빈 셀 비중이 늘어 분위 기준점이 0 으로 주저앉을 수 있다.
+        # 그러면 감쇠([3])와 drt 게이트가 무력화된다 — 조용히 지나가지 않게 잡는다.
+        if K["fRef"] <= 0:
+            print(f"  ⚠️ {t}: fRef=0 — 빈 셀 비중 증가로 drt 게이트 무력화. "
+                  "fref_q 분위를 인구>0 셀 기준으로 재산정 필요 (docs/GRID-500M.md)")
+        if K["dRef"] < 0.05:
+            print(f"  ⚠️ {t}: dRef={K['dRef']:.4f} — MI 감쇠 기준점이 0 근처. 재튜닝 필요")
         damp = np.clip(D / K["dRef"], 0, 1) ** DAMP_EXP
         mi_raw = (zD - zS) * damp
         mi = np.clip(mi_raw, -MI_CLAMP, MI_CLAMP)

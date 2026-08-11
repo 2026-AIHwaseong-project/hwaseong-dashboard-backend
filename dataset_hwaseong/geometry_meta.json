@@ -1,0 +1,7 @@
+{
+ "crs": "EPSG:5174",
+ "crs_gap_m": 6.2,
+ "path_rows": 24830,
+ "station_rows": 482779,
+ "fetched": "2026-08-11 05:15"
+}

@@ -1,4 +1,5 @@
 {
+ "gridSizeMeters": 1000,
  "method": "Poisson 회귀 (log-link), 일 단위. 좌변 board_day 는 실측값",
  "note": "시간대별 승차는 유동인구 배율로 안분한 추정치라 시간대 회귀는 잠재수요와 같은 배율을 공유해 순환이 된다. 그래서 일 단위로 검증한다.",
  "n_grids": 786,
@@ -12,46 +13,46 @@
   "log_rail"
  ],
  "coefficients": {
-  "log_pop": 0.5033,
-  "log_freq": 0.4306,
-  "coverage": 0.5168,
-  "log_workers": 0.2975,
-  "elderly_ratio": 0.708,
-  "log_rail": -0.2621
+  "log_pop": 0.3494,
+  "log_freq": 0.6081,
+  "coverage": 0.3921,
+  "log_workers": 0.1562,
+  "elderly_ratio": -0.993,
+  "log_rail": -0.276
  },
- "freqElasticity": 0.4306,
+ "freqElasticity": 0.6081,
  "r2": {
-  "train_raw": 0.79,
-  "train_log": 0.7999,
-  "cv_raw": 0.7318,
-  "cv_log": 0.8006
+  "train_raw": 0.8542,
+  "train_log": 0.8469,
+  "cv_raw": 0.801,
+  "cv_log": 0.8421
  },
  "cvMethod": "GroupKFold(5) by 읍면동 — 무작위 분할은 이웃 격자가 섞여 부풀려진다",
  "worstRegions": [
   {
-   "region": "양감면",
-   "cells": 34,
-   "r2_log": 0.0522
-  },
-  {
    "region": "반월동",
    "cells": 4,
-   "r2_log": 0.083
-  },
-  {
-   "region": "마도면",
-   "cells": 35,
-   "r2_log": 0.094
-  },
-  {
-   "region": "동탄1동",
-   "cells": 5,
-   "r2_log": 0.1195
+   "r2_log": 0.0279
   },
   {
    "region": "진안동",
    "cells": 8,
-   "r2_log": 0.2873
+   "r2_log": 0.1018
+  },
+  {
+   "region": "양감면",
+   "cells": 34,
+   "r2_log": 0.2448
+  },
+  {
+   "region": "마도면",
+   "cells": 35,
+   "r2_log": 0.3046
+  },
+  {
+   "region": "동탄1동",
+   "cells": 5,
+   "r2_log": 0.4243
   }
  ],
  "target": 0.6,
@@ -60,95 +61,95 @@
   "am": [
    {
     "rank": 1,
-    "region": "새솔동",
-    "gridId": "다사3921",
-    "priority": 2.5441,
-    "action": "ADD_FREQ",
-    "lat": 37.29048,
-    "lon": 126.81744
-   },
-   {
-    "rank": 2,
     "region": "동탄7동",
     "gridId": "다사6707",
-    "priority": 2.3291,
+    "priority": 2.4616,
     "action": "NEW_STOP",
     "lat": 37.16568,
     "lon": 127.13394
    },
    {
+    "rank": 2,
+    "region": "봉담읍",
+    "gridId": "다사4814",
+    "priority": 1.8643,
+    "action": "NEW_STOP",
+    "lat": 37.22792,
+    "lon": 126.91946
+   },
+   {
     "rank": 3,
-    "region": "진안동",
-    "gridId": "다사5913",
-    "priority": 2.303,
+    "region": "동탄6동",
+    "gridId": "다사6311",
+    "priority": 1.8417,
     "action": "ADD_FREQ",
-    "lat": 37.21945,
-    "lon": 127.04351
+    "lat": 37.20159,
+    "lon": 127.08869
    },
    {
     "rank": 4,
-    "region": "새솔동",
-    "gridId": "다사3920",
-    "priority": 1.9949,
-    "action": "ADD_FREQ",
-    "lat": 37.28146,
-    "lon": 126.81752
+    "region": "동탄9동",
+    "gridId": "다사6710",
+    "priority": 1.7824,
+    "action": "NEW_STOP",
+    "lat": 37.19272,
+    "lon": 127.13381
    },
    {
     "rank": 5,
-    "region": "봉담읍",
-    "gridId": "다사4813",
-    "priority": 1.9076,
-    "action": "DRT",
-    "lat": 37.21891,
-    "lon": 126.91953
+    "region": "남양읍",
+    "gridId": "다사4010",
+    "priority": 1.743,
+    "action": "ADD_FREQ",
+    "lat": 37.19139,
+    "lon": 126.8296
    }
   ],
   "night": [
    {
     "rank": 1,
-    "region": "화산동",
-    "gridId": "다사5612",
-    "priority": 3.4893,
-    "action": "DRT",
-    "lat": 37.2103,
-    "lon": 127.00975
-   },
-   {
-    "rank": 2,
     "region": "진안동",
     "gridId": "다사5914",
-    "priority": 2.8643,
+    "priority": 2.9971,
     "action": "DRT",
     "lat": 37.22847,
     "lon": 127.04345
    },
    {
-    "rank": 3,
+    "rank": 2,
     "region": "동탄7동",
     "gridId": "다사6707",
-    "priority": 2.8586,
+    "priority": 2.9579,
     "action": "DRT",
     "lat": 37.16568,
     "lon": 127.13394
    },
    {
+    "rank": 3,
+    "region": "동탄9동",
+    "gridId": "다사6708",
+    "priority": 2.4099,
+    "action": "DRT",
+    "lat": 37.1747,
+    "lon": 127.13389
+   },
+   {
     "rank": 4,
-    "region": "진안동",
-    "gridId": "다사6013",
-    "priority": 2.7217,
-    "action": "ADD_FREQ",
-    "lat": 37.2195,
-    "lon": 127.05478
+    "region": "봉담읍",
+    "gridId": "다사4814",
+    "priority": 2.2252,
+    "action": "DRT",
+    "lat": 37.22792,
+    "lon": 126.91946
    },
    {
     "rank": 5,
-    "region": "정남면",
-    "gridId": "다사5407",
-    "priority": 2.7174,
-    "action": "DRT",
-    "lat": 37.16514,
-    "lon": 126.98752
+    "region": "향남읍",
+    "gridId": "다사4702",
+    "priority": 2.1998,
+    "action": "ADD_FREQ",
+    "lat": 37.1197,
+    "lon": 126.90903
    }
   ]
  },

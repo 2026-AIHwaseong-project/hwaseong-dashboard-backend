@@ -1,0 +1,10 @@
+{
+ "extra_candidates": 246,
+ "extra_alive": 60,
+ "extra_dead": 186,
+ "stops_covered_before": 2201,
+ "stops_covered_after": 2320,
+ "stops_gained": 119,
+ "source_snapshot": "route_station.csv 기준일 2023-09-26",
+ "built": "2026-08-11 05:41"
+}

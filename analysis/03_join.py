@@ -65,6 +65,20 @@ read = lambda n: list(csv.DictReader(open(D / n, encoding="utf-8-sig")))
 gid = lambda v: str(v or "").strip().removeprefix("GGB")
 
 
+def read_plus(name):
+    """09_augment_routes 가 만든 보강본이 있으면 그걸 쓴다.
+
+    화성 면허가 아니라 01_fetch 에서 빠졌던 노선(수원·오산 면허, 마을버스)을
+    경기도 BMS 경유정류소로 채운 파일이다. 없으면 원본으로 그대로 돌아간다 —
+    09 를 안 돌린 팀원도 파이프라인이 깨지지 않는다."""
+    stem, ext = name.rsplit(".", 1)
+    p = D / f"{stem}_plus.{ext}"
+    if p.exists():
+        print(f"  [보강] {p.name} 사용")
+        return list(csv.DictReader(open(p, encoding="utf-8-sig")))
+    return read(name)
+
+
 def num(v, default=0.0):
     try:
         f = float(str(v).strip())
@@ -125,7 +139,7 @@ print(f"  집계 기간 {n_days}일 → 일평균 환산")
 print("=" * 66)
 print("[2] 노선 → 정류장 운행빈도 (시간대별)")
 routes = {}
-for r in read("routes.csv"):
+for r in read_plus("routes.csv"):
     peek, npeek, night = num(r["peek_alloc"]), num(r["npeek_alloc"]), num(r["night_alloc"])
     start = hhmm(r["first_time"]) or hhmm(r["up_first"])
     end = hhmm(r["last_time"]) or hhmm(r["up_last"])
@@ -153,7 +167,7 @@ def trips(rt, h0, h1):
 stop_freq = defaultdict(lambda: defaultdict(float))
 stop_routes = defaultdict(set)
 linked = 0
-for l in read("route_stops.csv"):
+for l in read_plus("route_stops.csv"):
     rt = routes.get(l["route_id"])
     k = gid(l["node_id"])
     if rt is None or k not in stops:

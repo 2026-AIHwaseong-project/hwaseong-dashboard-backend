@@ -164,6 +164,8 @@ QUALITATIVE = [
 
 print("=" * 64)
 print("[3-1] 정성 대조 — 공개 자료에서 확인된 것")
+# ⚠️ QUALITATIVE 의 순위 표기("출근 1·4위" 등)는 1km 격자에서 확인한 기록이다.
+#    격자 크기를 바꿔 재실행하면 위 [3] Top5 와 대조해 순위 표기를 갱신할 것.
 for q in QUALITATIVE:
     print(f"  {'✅' if q['verified'] else '⬜'} {q['region']:12} ({q['rank']})")
     print(f"       {q['finding']}")
@@ -172,7 +174,19 @@ print(f"\n  확인 {hit}/{len(QUALITATIVE)}건 — 목표는 Top5 중 3곳 이�
 
 print("=" * 64)
 print("[4] 저장 · 판정")
+try:
+    _spec = json.loads((D / "grid_spec.json").read_text(encoding="utf-8"))
+    _grid_size = int(_spec["sizeMeters"])
+    if int(_spec.get("cellCount", len(y))) != len(y):
+        print(f"  ⚠️ grid_spec({_spec['cellCount']}칸) ≠ 분석 격자({len(y)}칸) — 02_grid 재실행 필요")
+except FileNotFoundError:
+    _grid_size = 1000
+except (KeyError, ValueError, TypeError):
+    _grid_size = 1000
+    print("  ⚠️ grid_spec.json 손상 — 1km 로 간주하고 기록합니다")
+
 out = {
+    "gridSizeMeters": _grid_size,   # 어느 해상도에서 검증한 수치인지 — 500m 전환 시 필수 재실행
     "method": "Poisson 회귀 (log-link), 일 단위. 좌변 board_day 는 실측값",
     "note": "시간대별 승차는 유동인구 배율로 안분한 추정치라 시간대 회귀는 "
             "잠재수요와 같은 배율을 공유해 순환이 된다. 그래서 일 단위로 검증한다.",

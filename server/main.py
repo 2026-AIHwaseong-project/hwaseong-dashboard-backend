@@ -28,8 +28,9 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -57,7 +58,6 @@ ACTION_LABEL = {"NEW_STOP": "신설", "ADD_FREQ": "증차", "DRT": "똑버스"}
 TYPE_LABEL = {"stop": "정류장 신설", "drt": "똑버스 배치", "freq": "배차 증편"}
 COST_KRW = {"stop": 42_000_000, "drt": 180_000_000, "freq": 95_000_000}
 RADIUS_KM = {"stop": 2.0, "drt": 3.0, "freq": 2.4}
-TRIP_COEF = 3200
 STRAT_META = {
     "efficiency": {"label": "효율 최우선", "note": "사업비 1원당 해소 통행량이 가장 큰 순서로 고릅니다."},
     "equity":     {"label": "교통약자 우선", "note": "고령 잠재통행량 기준으로 개선 효과를 측정합니다."},
@@ -87,6 +87,18 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def _json(payload) -> Response:
+    """큰 응답의 직렬화 우회 — FastAPI 기본 jsonable_encoder 는 값 하나하나를
+    재귀 검사해서, 500m 격자(3,144셀×4시간대)에서는 /simulations 인코딩에만
+    39초가 걸렸다(실측). json.dumps 직행이면 같은 응답이 0.1초대다.
+    numpy 스칼라가 섞여 들어오면 .item() 으로 강등한다."""
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                           default=lambda o: o.item() if hasattr(o, "item") else str(o)),
+        media_type="application/json; charset=utf-8",
+    )
+
+
 app = FastAPI(title="화성시 버스 대시보드 API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
@@ -94,6 +106,9 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+# 시뮬레이션 응답(cellsByPeriod)이 1.5MB — JSON 이라 8~10배 압축됩니다.
+# 격자를 500m 로 세분화하면 4배가 더 커지므로 압축이 사실상 필수입니다.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # 프론트 폴백: fetch("/api/v1/…").catch(() => fetch("/data/grid_am.json"))
 #
@@ -108,7 +123,22 @@ if STATIC.exists():
 #   도커 이미지처럼 백엔드만 복사된 환경에서는 조용히 건너뛴다.
 _FRONT = ROOT.parent / "hwaseong-dashboard"
 if _FRONT.exists():
-    app.mount("/app", StaticFiles(directory=str(_FRONT), html=True), name="frontend")
+    class _NoCacheStatic(StaticFiles):
+        """개발 중에는 브라우저 캐시를 끕니다.
+
+        StaticFiles 는 ETag/Last-Modified 를 주는데, 프론트 JS 를 고치고 새로고침해도
+        브라우저가 캐시본을 계속 써서 "코드는 바꿨는데 화면은 그대로"가 됩니다.
+        실제로 map.js 를 고쳤는데 옛 코드가 도는 걸 한참 쫓았습니다.
+        """
+        def is_not_modified(self, response_headers, request_headers) -> bool:
+            return False
+
+        async def get_response(self, path, scope):
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-store, must-revalidate"
+            return resp
+
+    app.mount("/app", _NoCacheStatic(directory=str(_FRONT), html=True), name="frontend")
 
 
 # ─── 공통 헬퍼 ──────────────────────────────────────────────────────────────────
@@ -169,7 +199,7 @@ def _apply_cumulative(sim, placements: list) -> dict:
 def _trips_kpi(p: str, quad_arr) -> tuple:
     """사각지대 잠재수요 — /grid 와 **같은 산식**이어야 한다.
 
-    이전에는 sim.S0[p]["potential"] 을 786격자 전체에 대해 합했는데, 그건
+    이전에는 sim.S0[p]["potential"] 을 전 격자(1km 배포판 기준 786칸)에 대해 합했는데, 그건
     grid_join 의 시간대별 연령가중 인구지 일 버스통행이 아니다. 그래서 같은
     이름의 KPI 가 화면 두 곳에서 다른 값으로 나왔다.
 
@@ -337,14 +367,14 @@ def _build_sim_response(sim, placements_raw: list, state: dict, name: str, budge
 # ─── 1. GET /api/v1/meta ───────────────────────────────────────────────────────
 @app.get("/api/v1/meta")
 def get_meta():
-    return DATA["meta"]
+    return _json(DATA["meta"])
 
 
 # ─── 2. GET /api/v1/grid ───────────────────────────────────────────────────────
 @app.get("/api/v1/grid")
 def get_grid(period: str = Query("am")):
     _chk_period(period)
-    return DATA[f"grid_{period}"]
+    return _json(DATA[f"grid_{period}"])
 
 
 # ─── 3. GET /api/v1/priorities ─────────────────────────────────────────────────
@@ -379,13 +409,13 @@ def get_priorities(period: str = Query("am"), limit: int = Query(10)):
 # ─── 4. GET /api/v1/stops ──────────────────────────────────────────────────────
 @app.get("/api/v1/stops")
 def get_stops():
-    return DATA["stops"]
+    return _json(DATA["stops"])
 
 
 # ─── 5. GET /api/v1/routes ─────────────────────────────────────────────────────
 @app.get("/api/v1/routes")
 def get_routes():
-    return DATA["routes"]
+    return _json(DATA["routes"])
 
 
 # ─── 6. GET /api/v1/stops/{stop_id}/profile ───────────────────────────────────
@@ -444,7 +474,7 @@ def run_simulation(req: SimRequest):
     sim   = DATA["sim"]
     placements = _validate_placements(sim, req.placements)
     state = _apply_cumulative(sim, placements)
-    return _build_sim_response(sim, placements, state, req.name, req.budgetKrw)
+    return _json(_build_sim_response(sim, placements, state, req.name, req.budgetKrw))
 
 
 # ─── 8. POST /api/v1/recommendations ──────────────────────────────────────────
@@ -470,6 +500,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
     state = {p: {"freq": sim.S0[p]["freq"].copy(),
                  "nearest": sim.S0[p]["nearest"].copy()} for p in PERIODS}
     placed, used = [], set()
+    placed_idx = []          # (mode, gi) — 같은 수단 최소 이격(800m) 검사용
     region_cnt: dict = {}
     freq_cnt: dict = {}
     budget_left = budget
@@ -491,21 +522,30 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
     base_cells_am = DATA["cells"]["am"]
     gid_region = {gid: base_cells_am.get(gid, {}).get("region", "") for gid in sim.GIDS}
 
-    # 초기 Bhat 합 (증분 비교 기준)
-    cur_B = {p: float(np.sum(sim.Bhat(p, state[p]["freq"],
-                                       np.clip(1 - state[p]["nearest"] / sim.COVM, .05, 1))))
-             for p in PERIODS}
-
     stopped = "max_reached"
     min_cost = min(COST_KRW[m] for m in (["stop"] if strategy == "quick" else allowed_types))
     if budget < min_cost:
         return [], state, "budget_too_small"
+
+    # equity 의 수혜 대상(need/drt) 마스크 — 기준선 사분면 기반이라 불변.
+    eld_mask = ({p: np.isin(sim.S0[p]["quad0"], ["need", "drt"]) for p in PERIODS}
+                if strategy == "equity" else None)
 
     for _ in range(max_pl):
         if budget_left < min_cost:
             stopped = "budget_exhausted"
             break
         cov_now = np.clip(1 - state["am"]["nearest"] / sim.COVM, 0.05, 1.0)
+
+        # 현재 상태의 Bhat 벡터 — 스텝당 1회. 후보 평가는 아래에서 이 벡터와의
+        # **영향권 부분 차이**만 계산한다. 배치 영향권 밖 셀은 (새 합)−(현 합)에서
+        # 정확히 상쇄되므로 계산할 필요가 없다 — 전체 재계산은 500m(3,144셀)에서
+        # 스텝당 100초를 넘던 핫스팟이었다(실측 10건 1,040초).
+        curBvec = {}
+        for p in PERIODS:
+            c0 = np.clip(1 - state[p]["nearest"] / sim.COVM, 0.05, 1.0)
+            curBvec[p] = sim.Bhat(p, state[p]["freq"], c0)
+
         best = None
 
         for mode in types:
@@ -519,43 +559,61 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
             for gi in cand_idx:
                 if not g_ok[gi] or (mode, gi) in used:
                     continue
+                # 같은 수단끼리 도보권(sim.WALK=800m) 안에 겹쳐 배치하지 않는다.
+                # 1km 격자에서는 셀 간격 자체가 1km 라 이 제약이 발동하지 않지만,
+                # 격자를 세분화하면(500m) 인접 형제 셀 두 곳이 같은 도보권을
+                # 이중 서비스하는 추천이 나온다 — 셀 크기가 곧 이격 제약이던 전제 제거.
+                if any(pm == mode and sim.Dg[gi][pg] < sim.WALK
+                       for pm, pg in placed_idx):
+                    continue
                 gid = sim.GIDS[gi]
                 if strategy == "balance":
                     reg = gid_region.get(gid, "")
                     if reg and region_cnt.get(reg, 0) >= 1:
                         continue
 
+                # ── 영향권 인덱스 (시간대 무관) ──
+                d = sim.Dg[gi]
+                if mode == "stop":
+                    # freq 는 WALK(800m) 안, nearest 는 R_FINAL.stop(800m) 안에서만
+                    # 변한다 — 둘 다 800m 라 하나의 마스크로 충분하다.
+                    idx = np.where(d <= sim.WALK)[0]
+                    ms = mult = None
+                elif mode == "drt":
+                    idx = np.where(d <= sim.R_FINAL["drt"])[0]
+                    ms = mult = None
+                else:  # freq — 선택 정류장들의 도보권에 있는 셀만 영향
+                    ds = np.sqrt((sim.SX - sim.GX[gi])**2 + (sim.SY - sim.GY[gi])**2)
+                    ms = np.where(ds <= sim.R_FINAL["freq"])[0]
+                    cnt = freq_cnt.get(gi, 0)
+                    mult = sim.HEADWAY_MULT ** (cnt + 1) - sim.HEADWAY_MULT ** cnt
+                    idx = np.where(sim.Wsg[:, ms].sum(axis=1) > 0)[0]
+                if len(idx) == 0:
+                    continue
+
                 tB = 0.0
                 for p in PERIODS:
-                    d  = sim.Dg[gi]
-                    f1 = state[p]["freq"].copy()
-                    n1 = state[p]["nearest"].copy()
+                    f_sub = state[p]["freq"][idx]
+                    n_sub = state[p]["nearest"][idx]
                     if mode == "stop":
-                        mw = d <= sim.WALK
-                        f1[mw] += sim.FSTAR[p] * (1 - d[mw] / sim.WALK)
-                        mc = d <= sim.R_FINAL["stop"]
-                        n1[mc] = np.minimum(n1[mc], d[mc])
+                        f_sub = f_sub + sim.FSTAR[p] * (1 - d[idx] / sim.WALK)
+                        n_sub = np.minimum(n_sub, d[idx])
                     elif mode == "drt":
                         r = sim.R_FINAL["drt"]
-                        m = d <= r
-                        f1[m] += sim.PHI[p] * (1 - d[m] / r)
-                    elif mode == "freq":
-                        ds = np.sqrt((sim.SX - sim.GX[gi])**2 + (sim.SY - sim.GY[gi])**2)
-                        ms = ds <= sim.R_FINAL["freq"]
-                        cnt = freq_cnt.get(gi, 0)
-                        mult = sim.HEADWAY_MULT ** (cnt + 1) - sim.HEADWAY_MULT ** cnt
-                        f1 += sim.Wsg[:, ms] @ (sim.STOP_FREQ[p][ms] * mult)
-                    c1 = np.clip(1 - n1 / sim.COVM, 0.05, 1.0)
-
-                    if strategy == "equity":
-                        eld_mask = np.isin(sim.S0[p]["quad0"], ["need", "drt"])
-                        b_new = sim.Bhat(p, f1, c1)[eld_mask] * sim.S0[p]["eldw"][eld_mask]
-                        b_old = sim.Bhat(p, state[p]["freq"],
-                                         np.clip(1 - state[p]["nearest"] / sim.COVM, .05, 1)
-                                         )[eld_mask] * sim.S0[p]["eldw"][eld_mask]
-                        tB += float(b_new.sum()) - float(b_old.sum())
+                        f_sub = f_sub + sim.PHI[p] * (1 - d[idx] / r)
                     else:
-                        tB += float(np.sum(sim.Bhat(p, f1, c1))) - cur_B[p]
+                        f_sub = f_sub + sim.Wsg[np.ix_(idx, ms)] @ (sim.STOP_FREQ[p][ms] * mult)
+                    c_sub = np.clip(1 - n_sub / sim.COVM, 0.05, 1.0)
+                    # sim.Bhat 의 부분 평가 — 같은 식을 idx 셀에만 적용
+                    P = sim.POIS[p]
+                    b_sub = P["mu"][idx] * np.exp(np.clip(
+                        P["b2"] * (np.log1p(f_sub) - P["lq0"][idx])
+                        + P["b3"] * (c_sub - P["cov0"][idx]), -20, 6))
+                    if strategy == "equity":
+                        w = sim.S0[p]["eldw"][idx] * eld_mask[p][idx]
+                        tB += float((b_sub * w).sum()) - float((curBvec[p][idx] * w).sum())
+                    else:
+                        tB += float(b_sub.sum()) - float(curBvec[p][idx].sum())
 
                 eff = tB / cost
                 if best is None or eff > best["eff"]:
@@ -590,11 +648,12 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                 cnt = freq_cnt.get(gi, 0)
                 mult = sim.HEADWAY_MULT ** (cnt + 1) - sim.HEADWAY_MULT ** cnt
                 f += sim.Wsg[:, ms] @ (sim.STOP_FREQ[p][ms] * mult)
-            cur_B[p] = float(np.sum(sim.Bhat(p, f, np.clip(1 - n / sim.COVM, .05, 1))))
+            # 비교 기준(curBvec)은 다음 스텝 시작에서 새 상태로 다시 계산된다
 
         if mode == "freq":
             freq_cnt[gi] = freq_cnt.get(gi, 0) + 1
         used.add((mode, gi))
+        placed_idx.append((mode, gi))
         reg = gid_region.get(gid, "")
         region_cnt[reg] = region_cnt.get(reg, 0) + 1
         placed.append({"mode": mode, "gi": gi, "gid": gid, "tB": best["tB"], "cost": cost})
@@ -725,7 +784,7 @@ def run_recommendations(req: RecRequest):
                 pass
         result["alternatives"] = alts
 
-    return result
+    return _json(result)
 
 
 # ─── 9. POST /api/v1/reports/draft ────────────────────────────────────────────
@@ -838,7 +897,8 @@ def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
                      f"수요 대비 공급이 부족한 격자가 {need}개({share}%)로 나타났다. "
                      f"해당 격자의 잠재 통행량은 일 {trips:,}통행이며 이 중 고령층 추정은 "
                      f"{eld:,}통행이다.",
-             "bullets": [f"분석 격자 {total}개 (1km 단위)",
+             "bullets": [f"분석 격자 {total}개 "
+                         f"({DATA['meta']['grid']['sizeMeters'] / 1000:g}km 단위)",
                          f"고수요·저공급 {need}개 ({share}%)",
                          f"사각지대 잠재수요 일 {trips:,}통행"]},
             {"key": "priority", "heading": "2. 우선 조치 대상",
@@ -966,7 +1026,7 @@ def draft_report(req: ReportRequest):
 분석 시간대: {period_name} ({period_hours})
 
 현황 데이터:
-- 고수요·저공급(need) 격자: {kpi.get('needCells', '미제공')}개 / 전체 {kpi.get('totalCells', 786)}개
+- 고수요·저공급(need) 격자: {kpi.get('needCells', '미제공')}개 / 전체 {kpi.get('totalCells', DATA['meta']['grid']['cellCount'])}개
 - needShare: {kpi.get('needShare', '미제공')}%
 - 잠재통행량(일): {kpi.get('potentialTripsPerDay', '미제공')}통행
 - 평균 MI: {kpi.get('avgMi', '미제공')}

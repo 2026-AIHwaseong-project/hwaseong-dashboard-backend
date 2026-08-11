@@ -47,6 +47,8 @@ WALK = 800.0       # 승하차 안분 반경 (03_join 설계와 일치)
 COVM = 600.0       # coverage 임계 (04_model 설계와 일치)
 MIN_FREQ_PER_H = 2.0                                        # 04_model [8] 절대 가드와 동일
 PERIOD_HOURS   = {"am": 2, "day": 8, "pm": 2, "night": 2}
+# FSTAR·PHI 는 '셀당'도 '면적당'도 아닌 **시설당** 주입량이다(가상정류장 1개,
+# DRT 1대). 미터 반경 거리감쇠로 뿌리므로 격자 크기를 바꿔도 값은 그대로 둔다.
 FSTAR = {"am": 4.8, "day": 8.0, "pm": 4.8, "night": 0.0}   # 신설 f* (회/창)
 PHI   = {"am": 2.4, "day": 9.6, "pm": 2.4, "night": 2.4}   # DRT φ (회/창)
 HEADWAY_MULT = 1.43   # 증편 배수 (headway × 0.7)

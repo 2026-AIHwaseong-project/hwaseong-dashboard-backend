@@ -1,7 +1,8 @@
 """
-SGIS 1km 격자 → 화성시만 추출 + 읍면동 배정 + 격자 통계 결합
+SGIS 격자 → 화성시만 추출 + 읍면동 배정 + 격자 통계 결합
 
-    python analysis/02_grid.py
+    python analysis/02_grid.py               # 1km (공공데이터포털 배포판)
+    python analysis/02_grid.py --size 500    # 500m (SGIS 포털 별도 신청 데이터)
 
 이 프로젝트 최대 난관입니다. 격자코드로 화성시를 못 고르기 때문입니다.
 코드집 `adm_grid_mapping.xlsx` 는 시도 단위 매핑만 있어(경기도 → 다바·다사·
@@ -9,16 +10,26 @@ SGIS 1km 격자 → 화성시만 추출 + 읍면동 배정 + 격자 통계 결�
 따라서 격자 경계 shp 를 화성시 행정경계로 **공간조인**하는 게 유일한 방법입니다.
 
 산출: dataset_hwaseong/grid_hwaseong.csv   (담당 A → 05_load.py → batch_grid)
+      dataset_hwaseong/grid_spec.json      (격자 크기·개수 — 하류 스크립트가 읽음)
+
+격자 크기 전환(--size 500)
+    500m 통계·경계는 배포판에 없어 SGIS 포털에서 신청해 받아야 합니다.
+    받은 파일은 1km 와 같은 폴더 구조에 접미사만 바꿔 두면 됩니다:
+        dataset/…/2. 경계/grid_{블록}/grid_{블록}_500M.shp
+        dataset/…/1. 통계/…/2024년_{종류}_{블록}_500M.csv
+    절차·재튜닝 점검 목록은 docs/GRID-500M.md 참고.
 
 좌표계
     입력 격자 shp : EPSG:5179 (미터)   ← 모든 공간 연산은 여기서
     입력 경계     : EPSG:4326 (경위도) ← 5179 로 변환해서 씀
     출력          : 둘 다. lon/lat 은 4326, 면적·거리는 5179 기준
 """
+import argparse
 import csv
 import json
 import sys
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 import shapefile
@@ -34,6 +45,20 @@ ROOT = Path(__file__).resolve().parent.parent
 SGIS = ROOT / "dataset" / "국가데이터처_SGIS 격자 통계 및 경계"
 BOUNDARY = ROOT / "dataset_hwaseong" / "hwaseong_dong.geojson"
 OUT = ROOT / "dataset_hwaseong" / "grid_hwaseong.csv"
+SPEC_OUT = ROOT / "dataset_hwaseong" / "grid_spec.json"
+
+# 격자 크기 → SGIS 파일명 접미사. 1km 는 배포판 그대로, 500m 는 신청 데이터를
+# 같은 폴더 구조에 이 접미사로 배치하는 것이 이 프로젝트의 파일 계약이다.
+SIZE_SUFFIX = {1000: "1K", 500: "500M"}
+
+ap = argparse.ArgumentParser(description="SGIS 격자 → 화성시 추출")
+ap.add_argument("--size", type=int, default=1000, choices=sorted(SIZE_SUFFIX),
+                help="격자 한 변(m). 기본 1000. 500 은 SGIS 신청 데이터 필요")
+ARGS = ap.parse_args()
+SIZE_M = ARGS.size
+SUFFIX = SIZE_SUFFIX[SIZE_M]
+# 셀 수 기대 범위 — 1km 실측 786개를 면적비로 환산 (경계 걸침 오차 여유 포함)
+SCALE = (1000 / SIZE_M) ** 2
 
 # 경기도(시도코드 31)에 걸치는 100km 격자 블록. 코드집 adm_grid_mapping.xlsx 기준
 BLOCKS = ["다바", "다사", "다아", "라바", "라사", "라아"]
@@ -91,13 +116,19 @@ def load_dongs():
             for f in gj["features"]]
 
 
-def read_stat(path, wanted):
-    """SGIS 통계는 long format(격자코드·통계항목·통계값). 필요한 코드만 격자별로 합산."""
+def read_stat(path, wanted, keep=None):
+    """SGIS 통계는 long format(격자코드·통계항목·통계값). 필요한 코드만 격자별로 합산.
+
+    keep: 화성시 격자 ID 집합. 블록 파일은 전국 단위라 여기서 조기에 거르지 않으면
+    500m(행수 ~4배)에서 화성 외 격자까지 전부 메모리에 쌓입니다.
+    """
     code2col = {c: col for col, codes in wanted.items() for c in codes}
     acc = defaultdict(lambda: defaultdict(float))
     with open(path, encoding="cp949") as f:
         next(f)  # header
         for row in csv.reader(f):
+            if keep is not None and row[1] not in keep:
+                continue
             col = code2col.get(row[2])
             if col:
                 # 비공개 처리된 셀은 빈 값이나 '*' 로 옵니다
@@ -112,13 +143,16 @@ if not (SGIS / "2. 경계").is_dir():
     sys.exit(
         "\n원본 SGIS 격자 데이터가 없습니다.\n"
         f"  찾은 경로: {SGIS}\n\n"
-        "이 스크립트는 전국 원본(279MB)이 있어야 돌아갑니다. 저장소에는 커밋돼 있지\n"
+        "이 스크립트는 전국 원본이 있어야 돌아갑니다. 저장소에는 커밋돼 있지\n"
         "않습니다(.gitignore). **이미 만들어진 결과물이 필요할 뿐이라면 받지 마세요** —\n"
-        "  dataset_hwaseong/grid_hwaseong.csv  (786격자, 커밋됨)\n"
+        "  dataset_hwaseong/grid_hwaseong.csv  (커밋됨)\n"
         "가 이 스크립트의 산출물이고 그대로 쓰면 됩니다.\n\n"
-        "격자 로직을 바꾸려고 재실행하는 경우에만 아래에서 받아 dataset/ 에 푸세요.\n"
-        "  https://www.data.go.kr/data/15141768/fileData.do\n"
+        "격자 로직을 바꾸려고 재실행하는 경우에만 받아서 dataset/ 에 푸세요.\n"
+        "  1km  배포판: https://www.data.go.kr/data/15141768/fileData.do\n"
+        "  500m 신청분: SGIS 포털 신청 후 docs/GRID-500M.md 의 배치 규칙대로\n"
     )
+
+print(f"격자 크기: {SIZE_M}m (파일 접미사 _{SUFFIX})")
 
 print("=" * 64)
 print("[1] 화성시 읍면동 경계 로드")
@@ -134,7 +168,7 @@ print("=" * 64)
 print(f"[2] 격자 shp {len(BLOCKS)}개 블록 → 화성시 필터 + 읍면동 배정")
 cells, scanned = {}, 0
 for blk in BLOCKS:
-    shp = SGIS / "2. 경계" / f"grid_{blk}" / f"grid_{blk}_1K"
+    shp = SGIS / "2. 경계" / f"grid_{blk}" / f"grid_{blk}_{SUFFIX}"
     if not shp.with_suffix(".shp").exists():
         print(f"  !! 없음: {shp.name}")
         continue
@@ -176,13 +210,12 @@ print("[3] 격자 통계 결합")
 for folder, prefix, wanted in STATS:
     got = 0
     for blk in BLOCKS:
-        p = SGIS / "1. 통계" / folder / f"2024년_{prefix}_{blk}_1K.csv"
+        p = SGIS / "1. 통계" / folder / f"2024년_{prefix}_{blk}_{SUFFIX}.csv"
         if not p.exists():
             continue
-        for gid, vals in read_stat(p, wanted).items():
-            if gid in cells:
-                cells[gid].update(vals)
-                got += 1
+        for gid, vals in read_stat(p, wanted, keep=cells.keys()).items():
+            cells[gid].update(vals)
+            got += 1
     shown = ", ".join(list(wanted)[:3]) + (f" 외 {len(wanted) - 3}개" if len(wanted) > 3 else "")
     print(f"  {prefix:6} {got:>5,}칸 결합  ({shown})")
 
@@ -191,6 +224,11 @@ cols = (["grid_id", "lon", "lat", "x_5179", "y_5179",
          "region_code", "region", "region_kind",
          "pop", "elderly", "elderly_ratio", "households", "houses", "workers"]
         + list(AGE_BANDS))
+# 통계가 아예 안 붙은 격자 수 — 1km 에선 대부분 진짜 무인 격자지만, 500m 는
+# SGIS 소인구 비공개(마스킹)가 늘어 실제 인구가 깎일 수 있다. 수를 세서 보고한다.
+no_stat = sum(1 for c in cells.values() if "pop" not in c)
+print(f"  통계 미결합(0 처리) 격자 {no_stat:,}/{len(cells):,}칸"
+      + (" — 500m 는 비공개 마스킹 손실 여부를 총인구 검증에서 확인" if SIZE_M < 1000 else ""))
 for c in cells.values():
     for k in BASE + list(AGE_BANDS):
         c.setdefault(k, 0)                              # 통계가 없는 격자 = 실제로 0인 무인 격자
@@ -200,10 +238,6 @@ for c in cells.values():
     c["elderly_ratio"] = round(c["elderly"] / c["pop"], 4) if c["pop"] else 0.0
 
 rows = sorted(cells.values(), key=lambda c: c["grid_id"])
-with open(OUT, "w", encoding="utf-8-sig", newline="") as f:
-    w = csv.DictWriter(f, fieldnames=cols)
-    w.writeheader()
-    w.writerows(rows)
 
 print("=" * 64)
 print("[4] 검증")
@@ -229,7 +263,27 @@ for r_ in sorted(by_region.items(), key=lambda kv: -kv[1][0])[:5]:
 
 # 화성시 실제 인구는 약 100만명(2026). 격자 합이 여기서 크게 벗어나면 공간조인이 틀린 것입니다.
 assert 700_000 < pop < 1_300_000, f"총인구 {pop:,.0f} — 화성시 규모(약 100만)를 벗어납니다"
-assert 600 < len(rows) < 1100, f"격자 {len(rows)}칸 — 예상(약 850칸)을 벗어납니다"
+# 셀 수 기대치는 1km 실측(786칸)을 면적비로 환산합니다. 500m 면 약 3,100칸.
+assert 600 * SCALE < len(rows) < 1100 * SCALE, \
+    f"격자 {len(rows)}칸 — {SIZE_M}m 예상(약 {int(850 * SCALE)}칸)을 벗어납니다"
 assert len(by_region) == len(dongs), f"읍면동 {len(by_region)}/{len(dongs)}개만 격자를 받았습니다"
-assert gap < 0.02, f"연령대 합이 총인구와 {gap:.1%} 어긋납니다 — SGIS 코드 매핑 확인"
+# 연령대합-총인구 허용오차. 500m 는 연령 내역만 비공개된 셀이 늘어 어긋남이 커진다.
+GAP_MAX = 0.02 if SIZE_M >= 1000 else 0.05
+assert gap < GAP_MAX, f"연령대 합이 총인구와 {gap:.1%} 어긋납니다 — SGIS 코드 매핑/마스킹 확인"
+
+# ── 저장은 검증을 전부 통과한 뒤에만 한다 ──
+# CSV 를 검증 전에 쓰면, 첫 500m 시도가 assert 로 죽었을 때 CSV(500m)와
+# 스펙(직전 1km)이 갈라진 채 남아 — 하류 전체가 셀 크기를 잘못 알게 된다.
+# CSV 와 스펙은 항상 한 지점에서 함께 쓴다.
+with open(OUT, "w", encoding="utf-8-sig", newline="") as f:
+    w = csv.DictWriter(f, fieldnames=cols)
+    w.writeheader()
+    w.writerows(rows)
+SPEC_OUT.write_text(json.dumps({
+    "sizeMeters": SIZE_M,
+    "cellCount": len(rows),
+    "sourceSuffix": f"_{SUFFIX}",
+    "generatedAt": str(date.today()),
+}, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"\n  ✅ 통과 → {OUT.relative_to(ROOT)}  ({OUT.stat().st_size / 1e6:.2f} MB)")
+print(f"     격자 스펙 → {SPEC_OUT.relative_to(ROOT)}  ({SIZE_M}m · {len(rows):,}칸)")
