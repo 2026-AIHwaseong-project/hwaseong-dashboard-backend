@@ -489,13 +489,22 @@ class RecRequest(BaseModel):
 
 
 def _greedy(sim, strategy: str, budget: int, max_pl: int,
-            allowed_types: list, region_ids=None) -> tuple:
+            allowed_types: list, region_ids=None, period: str = "am") -> tuple:
     """전략별 그리디. (placed, state, stopped) 반환.
 
     stopped 는 왜 멈췄는지다. 프론트 계약(docs/API.md §3.7)에 있는 값이고,
     없으면 화면이 "0건인데 예산 소진" 같은 모순 문구를 낸다.
         max_reached | budget_exhausted | budget_too_small
         no_further_gain | no_candidate
+
+    period 는 **최적화 대상 시간대**다. 후보 사분면·수단 게이트·목적함수가
+    전부 이 시간대 기준이다. 예전에는 후보와 게이트를 am 으로 못박고 목적함수는
+    4시간대를 합산해서, period 를 바꿔도 배치가 글자 하나 안 바뀌었다 —
+    "시간대를 바꾸면 우선순위가 뒤집힌다"는 이 프로젝트의 핵심 주장을
+    정작 추천 화면만 반영하지 못하고 있었다.
+
+    배치의 물리적 효과는 여전히 4시간대 전부에 적용된다(아래 상태 갱신 루프).
+    고르는 기준만 요청 시간대이고, 파급 효과는 응답의 periods[] 로 전부 보고된다.
     """
     state = {p: {"freq": sim.S0[p]["freq"].copy(),
                  "nearest": sim.S0[p]["nearest"].copy()} for p in PERIODS}
@@ -505,8 +514,9 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
     freq_cnt: dict = {}
     budget_left = budget
 
-    am_quad   = sim.S0["am"]["quad0"]
-    cand_mask = np.isin(am_quad, ["need", "drt"])
+    # 후보는 **요청 시간대**의 사분면으로 고른다. 심야에만 사각지대인 격자가
+    # am 기준 후보 목록에서 통째로 빠지던 문제를 여기서 막는다.
+    cand_mask = np.isin(sim.S0[period]["quad0"], ["need", "drt"])
     # `if region_ids:` 로 쓰면 빈 집합이 falsy 라 필터가 통째로 건너뛰어진다.
     # 오타난 읍면동을 보냈을 때 조용히 화성시 전체 결과가 나오는 게 더 위험하다.
     # None(=범위 지정 없음)과 빈 집합(=그 동에 후보 없음)을 구분한다.
@@ -528,23 +538,23 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
         return [], state, "budget_too_small"
 
     # equity 의 수혜 대상(need/drt) 마스크 — 기준선 사분면 기반이라 불변.
-    eld_mask = ({p: np.isin(sim.S0[p]["quad0"], ["need", "drt"]) for p in PERIODS}
+    # 목적함수가 요청 시간대 하나이므로 그 시간대만 만든다.
+    eld_mask = ({period: np.isin(sim.S0[period]["quad0"], ["need", "drt"])}
                 if strategy == "equity" else None)
 
     for _ in range(max_pl):
         if budget_left < min_cost:
             stopped = "budget_exhausted"
             break
-        cov_now = np.clip(1 - state["am"]["nearest"] / sim.COVM, 0.05, 1.0)
+        cov_now = np.clip(1 - state[period]["nearest"] / sim.COVM, 0.05, 1.0)
 
         # 현재 상태의 Bhat 벡터 — 스텝당 1회. 후보 평가는 아래에서 이 벡터와의
         # **영향권 부분 차이**만 계산한다. 배치 영향권 밖 셀은 (새 합)−(현 합)에서
         # 정확히 상쇄되므로 계산할 필요가 없다 — 전체 재계산은 500m(3,144셀)에서
         # 스텝당 100초를 넘던 핫스팟이었다(실측 10건 1,040초).
-        curBvec = {}
-        for p in PERIODS:
-            c0 = np.clip(1 - state[p]["nearest"] / sim.COVM, 0.05, 1.0)
-            curBvec[p] = sim.Bhat(p, state[p]["freq"], c0)
+        # 목적함수가 요청 시간대 하나이므로 기준 벡터도 그 시간대만 만든다.
+        c0 = np.clip(1 - state[period]["nearest"] / sim.COVM, 0.05, 1.0)
+        curBvec = {period: sim.Bhat(period, state[period]["freq"], c0)}
 
         best = None
 
@@ -552,9 +562,19 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
             cost = COST_KRW[mode]
             if cost > budget_left:
                 continue
+            # 수단은 coverage 로 **배타 결정**된다 (docs/BACKEND.md §6.2).
+            #   cov ≥ 0.50        정류장은 도보권 안 → 버스가 안 온다 → freq 증편
+            #   0.15 ≤ cov < 0.50 노선은 지나는데 정류장이 멀다 → stop 신설
+            #   cov < 0.15        노선 자체가 없다 → 고정노선 비효율 → drt 똑버스
+            #
+            # drt 를 전 격자 허용(np.ones)으로 두면 세 수단이 모든 후보에서 경쟁하는데,
+            # 통행/원 효율이 freq 의 1/45 라 예산을 아무리 키워도 순서가 오지 않는다.
+            # 실제로 4전략 × 4시간대 전부에서 drt 채택이 0건이었다 — 지도는 사각지대
+            # 격자 대부분에 "똑버스"를 권하는데 추천 화면만 한 대도 안 놓는 모순이었다.
+            # 배타 게이트로 되돌리면 cov<0.15 구간에서는 drt 가 유일한 수단이 된다.
             g_ok = {"stop": (cov_now >= 0.15) & (cov_now < 0.5),
                     "freq": cov_now >= 0.5,
-                    "drt":  np.ones(sim.N, bool)}[mode]
+                    "drt":  cov_now < 0.15}[mode]
 
             for gi in cand_idx:
                 if not g_ok[gi] or (mode, gi) in used:
@@ -592,7 +612,9 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                     continue
 
                 tB = 0.0
-                for p in PERIODS:
+                # 목적함수는 **요청 시간대 하나**다. 4시간대를 합산하면 출근의
+                # 큰 수요가 심야를 항상 덮어써서 period 가 결과에 영향을 주지 못한다.
+                for p in (period,):
                     f_sub = state[p]["freq"][idx]
                     n_sub = state[p]["nearest"][idx]
                     if mode == "stop":
@@ -688,7 +710,7 @@ def run_recommendations(req: RecRequest):
 
     placed, final_state, stopped = _greedy(
         sim, strategy, req.budgetKrw, req.maxPlacements,
-        list(req.allowedTypes), region_ids,
+        list(req.allowedTypes), region_ids, req.period,
     )
 
     placements_raw = [{"type": pl["mode"], "cellId": pl["gid"], "count": 1} for pl in placed]
@@ -725,7 +747,10 @@ def run_recommendations(req: RecRequest):
     result = {
         "method": "budget-constrained greedy marginal benefit",
         "methodLabel": "예산 제약 하 한계효과 최대화",
-        "methodNote": "미해결 통행량을 사업비 1원당 가장 많이 줄이는 지점을 순차 선택합니다.",
+        "methodNote": f"{PERIOD_NAME[req.period]} 시간대 기준으로, 미해결 통행량을 "
+                      "사업비 1원당 가장 많이 줄이는 지점을 순차 선택합니다. "
+                      "수단은 정류장 접근성(coverage)으로 배타 결정되며, "
+                      "배치 효과는 4개 시간대 전부에 반영해 보고합니다.",
         # 요청에 없었으면 null = 화성시 전체 (docs/API.md §3.7)
         "region": req.region or None,
         "strategy": strategy,
@@ -773,7 +798,11 @@ def run_recommendations(req: RecRequest):
                 continue
             alt_types = ["stop"] if s == "quick" else list(req.allowedTypes)
             try:
-                ap, _, _st = _greedy(sim, s, req.budgetKrw, req.maxPlacements, alt_types, region_ids)
+                # 대안 전략도 본안과 **같은 시간대**로 비교해야 한다.
+                # period 를 안 넘기면 본안만 요청 시간대이고 대안 4종은 출근 기준이 되어,
+                # 화면의 전략 비교표가 서로 다른 시간대를 나란히 놓게 된다.
+                ap, _, _st = _greedy(sim, s, req.budgetKrw, req.maxPlacements,
+                                     alt_types, region_ids, req.period)
                 alts.append({
                     "strategy": s, "label": STRAT_META[s]["label"],
                     "count": len(ap), "totalKrw": sum(p["cost"] for p in ap),
