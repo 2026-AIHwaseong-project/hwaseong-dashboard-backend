@@ -498,6 +498,7 @@ class RecRequest(BaseModel):
     maxPlacements: int = 10
     allowedTypes: list = ["stop", "drt", "freq"]
     region: Optional[str] = None
+    cellIds: Optional[list] = None   # 임의 영역(지도 드래그) — 후보를 이 격자로 제한
     includeAlternatives: bool = False
 
 
@@ -712,14 +713,18 @@ def run_recommendations(req: RecRequest):
         raise HTTPException(400, "maxPlacements 는 1~50 사이여야 합니다.")
 
     sim = DATA["sim"]
+    # _greedy 는 임의의 격자 ID 집합을 받는다. 읍면동 이름(region)은 그 집합을
+    # 만드는 한 가지 방법일 뿐이라, 지도에서 끈 영역(cellIds)도 같은 경로로 쓴다.
     region_ids = None
-    if req.region:
+    if req.cellIds:
+        region_ids = set(req.cellIds)
+    elif req.region:
         region_ids = {c["id"] for c in DATA["cells"]["am"].values()
                       if c["region"] == req.region}
 
     # region 이 오면 balance(지역 균형)는 성립하지 않는다. 동별 1건 상한이
     # 곧 1건 추천이라서다. efficiency 로 대체하고 alternatives 에서도 뺀다.
-    strategy = "efficiency" if (req.region and req.strategy == "balance") else req.strategy
+    strategy = "efficiency" if (region_ids is not None and req.strategy == "balance") else req.strategy
 
     placed, final_state, stopped = _greedy(
         sim, strategy, req.budgetKrw, req.maxPlacements,
