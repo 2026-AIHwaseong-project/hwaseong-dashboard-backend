@@ -13,46 +13,73 @@
   "log_rail"
  ],
  "coefficients": {
-  "log_pop": 0.3494,
-  "log_freq": 0.6081,
-  "coverage": 0.3921,
-  "log_workers": 0.1562,
-  "elderly_ratio": -0.993,
-  "log_rail": -0.276
+  "log_pop": 0.423,
+  "log_freq": 0.5509,
+  "coverage": 0.0032,
+  "log_workers": 0.1749,
+  "elderly_ratio": -1.6922,
+  "log_rail": -0.1481
  },
- "freqElasticity": 0.6081,
+ "freqElasticity": 0.5509,
  "r2": {
-  "train_raw": 0.8542,
-  "train_log": 0.8469,
-  "cv_raw": 0.801,
-  "cv_log": 0.8421
+  "train_raw": 0.9276,
+  "train_log": 0.8462,
+  "cv_raw": 0.8744,
+  "cv_log": 0.8384
  },
+ "r2BySubset": {
+  "pop_ge_0": {
+   "n": 786,
+   "boardingShare": 1.0,
+   "cv_log": 0.8384,
+   "cv_raw": 0.8744
+  },
+  "pop_ge_50": {
+   "n": 603,
+   "boardingShare": 0.9989,
+   "cv_log": 0.796,
+   "cv_raw": 0.8708
+  },
+  "pop_ge_200": {
+   "n": 354,
+   "boardingShare": 0.9806,
+   "cv_log": 0.7779,
+   "cv_raw": 0.8598
+  }
+ },
+ "headline": {
+  "scope": "인구≥200 격자 354칸 (실측 승차의 98.1%)",
+  "cv_log": 0.7779,
+  "cv_raw": 0.8598
+ },
+ "demandBasis": "초승(환승 제외) · 평일 일평균 — 03_join.py [4][5]",
+ "qualitativeUsable": 0,
  "cvMethod": "GroupKFold(5) by 읍면동 — 무작위 분할은 이웃 격자가 섞여 부풀려진다",
  "worstRegions": [
   {
-   "region": "반월동",
-   "cells": 4,
-   "r2_log": 0.0279
-  },
-  {
-   "region": "진안동",
-   "cells": 8,
-   "r2_log": 0.1018
-  },
-  {
    "region": "양감면",
    "cells": 34,
-   "r2_log": 0.2448
-  },
-  {
-   "region": "마도면",
-   "cells": 35,
-   "r2_log": 0.3046
+   "r2_log": -0.2617
   },
   {
    "region": "동탄1동",
    "cells": 5,
-   "r2_log": 0.4243
+   "r2_log": -0.0947
+  },
+  {
+   "region": "진안동",
+   "cells": 8,
+   "r2_log": 0.0406
+  },
+  {
+   "region": "반월동",
+   "cells": 4,
+   "r2_log": 0.076
+  },
+  {
+   "region": "마도면",
+   "cells": 35,
+   "r2_log": 0.2676
   }
  ],
  "target": 0.6,
@@ -63,7 +90,7 @@
     "rank": 1,
     "region": "동탄7동",
     "gridId": "다사6707",
-    "priority": 2.4616,
+    "priority": 2.5408,
     "action": "DRT",
     "lat": 37.16568,
     "lon": 127.13394
@@ -72,37 +99,37 @@
     "rank": 2,
     "region": "봉담읍",
     "gridId": "다사4814",
-    "priority": 1.8643,
+    "priority": 1.9252,
     "action": "DRT",
     "lat": 37.22792,
     "lon": 126.91946
    },
    {
     "rank": 3,
-    "region": "동탄6동",
-    "gridId": "다사6311",
-    "priority": 1.8417,
-    "action": "NEW_STOP",
-    "lat": 37.20159,
-    "lon": 127.08869
-   },
-   {
-    "rank": 4,
     "region": "동탄9동",
     "gridId": "다사6710",
-    "priority": 1.7824,
+    "priority": 1.8397,
     "action": "DRT",
     "lat": 37.19272,
     "lon": 127.13381
    },
    {
-    "rank": 5,
+    "rank": 4,
     "region": "남양읍",
     "gridId": "다사4010",
-    "priority": 1.743,
+    "priority": 1.7893,
     "action": "NEW_STOP",
     "lat": 37.19139,
     "lon": 126.8296
+   },
+   {
+    "rank": 5,
+    "region": "봉담읍",
+    "gridId": "다사4813",
+    "priority": 1.7532,
+    "action": "DRT",
+    "lat": 37.21891,
+    "lon": 126.91953
    }
   ],
   "night": [
@@ -110,7 +137,7 @@
     "rank": 1,
     "region": "진안동",
     "gridId": "다사5914",
-    "priority": 2.9971,
+    "priority": 3.0863,
     "action": "ADD_FREQ",
     "lat": 37.22847,
     "lon": 127.04345
@@ -119,7 +146,7 @@
     "rank": 2,
     "region": "동탄7동",
     "gridId": "다사6707",
-    "priority": 2.9579,
+    "priority": 3.0388,
     "action": "DRT",
     "lat": 37.16568,
     "lon": 127.13394
@@ -128,7 +155,7 @@
     "rank": 3,
     "region": "동탄9동",
     "gridId": "다사6708",
-    "priority": 2.4099,
+    "priority": 2.4956,
     "action": "ADD_FREQ",
     "lat": 37.1747,
     "lon": 127.13389
@@ -137,7 +164,7 @@
     "rank": 4,
     "region": "봉담읍",
     "gridId": "다사4814",
-    "priority": 2.2252,
+    "priority": 2.29,
     "action": "DRT",
     "lat": 37.22792,
     "lon": 126.91946
@@ -146,7 +173,7 @@
     "rank": 5,
     "region": "향남읍",
     "gridId": "다사4702",
-    "priority": 2.1998,
+    "priority": 2.2268,
     "action": "ADD_FREQ",
     "lat": 37.1197,
     "lon": 126.90903
@@ -159,11 +186,7 @@
    "verified": true,
    "finding": "송산그린시티. 안산 생활권인데 연결 시내버스가 안산 업체 10번 하나뿐. 화성시가 동탄·병점권 위주로 투자해 노선 신설이 지연된다고 보도됨",
    "source": "경기일보 2018-05-02 / 나무위키 송산그린시티·새솔동",
-   "rank": "출근 우선순위 밖 · 심야 우선순위 밖",
-   "rankDetail": {
-    "am": [],
-    "night": []
-   },
+   "currentRank": "am 27/32위 · night need 아님",
    "inTop5": false
   },
   {
@@ -171,48 +194,23 @@
    "verified": true,
    "finding": "비봉지구 마을버스 막차가 22시경 종료. 인구 증가 대비 대중교통 개선 지연",
    "source": "나무위키 가축수송(교통)/사례/버스/경기도",
-   "rank": "출근 우선순위 밖 · 심야 9위·40위",
-   "rankDetail": {
-    "am": [],
-    "night": [
-     9,
-     40
-    ]
-   },
+   "currentRank": "am need 아님 · night 8/43위",
    "inTop5": false
   },
   {
    "region": "화산동",
    "verified": false,
-   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 심야 need 격자로 실측된다",
+   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 야간 무공급(운행 0회) 격자로 실측된다",
    "source": null,
-   "rank": "출근 18위 · 심야 24위·34위",
-   "rankDetail": {
-    "am": [
-     18
-    ],
-    "night": [
-     24,
-     34
-    ]
-   },
+   "currentRank": "am 24/32위 · night 26/43위",
    "inTop5": false
   },
   {
    "region": "정남면",
    "verified": false,
-   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 심야 need 격자로 실측된다",
+   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함",
    "source": null,
-   "rank": "출근 24위 · 심야 16위·23위",
-   "rankDetail": {
-    "am": [
-     24
-    ],
-    "night": [
-     16,
-     23
-    ]
-   },
+   "currentRank": "am 22/32위 · night 15/43위",
    "inTop5": false
   }
  ]
