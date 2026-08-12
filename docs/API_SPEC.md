@@ -441,6 +441,7 @@ Accept: application/json
   "maxPlacements": 10,
   "allowedTypes": ["stop", "drt", "freq"],
   "region": null,
+  "cellIds": null,
   "includeAlternatives": false
 }
 ```
@@ -448,12 +449,25 @@ Accept: application/json
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `strategy` | string | `"efficiency"` | 추천 전략 (아래 참고) |
-| `period` | string | `"am"` | 유효성 검증용 시간대 |
+| `period` | string | `"am"` | **후보·목적함수·수단 게이트의 기준 시간대.** 시간대를 바꾸면 순위가 바뀝니다 |
 | `budgetKrw` | integer | `3000000000` | 예산 상한 (원) |
 | `maxPlacements` | integer | `10` | 최대 배치 건수 |
 | `allowedTypes` | array | `["stop","drt","freq"]` | 허용 수단 |
 | `region` | string\|null | `null` | 특정 읍면동으로 범위 제한 (예: `"새솔동"`) |
+| `cellIds` | array\|null | `null` | 임의 격자 집합으로 범위 제한 (지도 드래그 영역). **`region` 보다 우선** |
 | `includeAlternatives` | boolean | `false` | 다른 전략 요약 병렬 반환 여부 |
+
+**범위 제한(`cellIds` · `region`)의 동작**
+
+- 둘 다 오면 `cellIds` 가 이깁니다. `region` 은 무시됩니다.
+- `cellIds: []` (빈 배열)는 **"범위를 지정했는데 대상이 없다"** 로 해석해 `placements: []` ·
+  `stoppedBecause: "no_candidate"` 를 돌려줍니다. 화성시 전체 추천으로 넓어지지 **않습니다**.
+  `null` 이어야 "범위 제한 없음"입니다.
+- 존재하지 않는 격자 ID나 없는 읍면동 이름도 400 이 아니라 같은 방식으로 0건입니다
+  (해석 불가한 범위 = 빈 결과). 사용자가 "짓겠다"고 지정한 `placements[]` 는 반대로
+  알 수 없는 `cellId` 에 400 을 던집니다 — 의도가 다르기 때문입니다.
+- 범위가 지정되면 `balance`(지역 균형)는 `efficiency` 로 대체됩니다. 응답의
+  `strategy` 필드로 확인하세요.
 
 #### 추천 전략
 

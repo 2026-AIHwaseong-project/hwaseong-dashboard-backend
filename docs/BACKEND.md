@@ -358,7 +358,7 @@ app.add_middleware(CORSMiddleware,
 | B2 | `GET /meta` `/grid` `/priorities` | `v_grid_metrics` → 프론트 `cells[]` 변환 계층 |
 | B3 | `GET /stops` `/routes` `/stops/{id}/profile` | |
 | B4 | `POST /simulations` ★ | 배치 효과 적용 후 **4시간대 재계산**. 정규화 기준통계 고정 |
-| B5 | `POST /recommendations` ★ | 그리디 최적화 + 국소 재계산 + **`region` 범위 제한** (§6.2) |
+| B5 | `POST /recommendations` ★ | 그리디 최적화 + 국소 재계산 + **범위 제한 `cellIds`(지도 영역) · `region`(읍면동)** (§6.2) |
 | B6 | `POST /reports/draft` | Claude API 프록시 (`docs/AI-REPORT.md` 규격) |
 | B7 | (확장) 관리자·실시간 | `admin_*` CRUD · 인증 · SSE 워커 |
 

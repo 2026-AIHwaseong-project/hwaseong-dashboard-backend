@@ -715,9 +715,19 @@ def run_recommendations(req: RecRequest):
     sim = DATA["sim"]
     # _greedy 는 임의의 격자 ID 집합을 받는다. 읍면동 이름(region)은 그 집합을
     # 만드는 한 가지 방법일 뿐이라, 지도에서 끈 영역(cellIds)도 같은 경로로 쓴다.
+    #
+    # `is not None` 이어야 한다. `if req.cellIds:` 로 쓰면 빈 배열이 falsy 라
+    # "이 영역으로 제한해 달라"는 요청이 조용히 화성시 전체 추천으로 바뀐다.
+    # _greedy 가 496행 주석에서 못박은 함정을 호출부에서 한 단계 위로 되살리는
+    # 꼴이다. 형제 파라미터인 region 도 없는 동네를 주면 빈 집합 → 0건이 계약이고
+    # e2e-live.js 가 그걸 단언한다 — cellIds 만 정반대로 동작하면 안 된다.
+    #
+    # str() 로 감싸는 것은 스키마가 bare list(=list[Any])라서다. 딕셔너리 같은
+    # 해시 불가 원소가 들어오면 set() 이 TypeError 를 던져 400 이 아니라 500 이
+    # 나간다. 같은 함수의 strategy·allowedTypes 는 전부 400 으로 돌려준다.
     region_ids = None
-    if req.cellIds:
-        region_ids = set(req.cellIds)
+    if req.cellIds is not None:
+        region_ids = {str(x) for x in req.cellIds}
     elif req.region:
         region_ids = {c["id"] for c in DATA["cells"]["am"].values()
                       if c["region"] == req.region}
