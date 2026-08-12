@@ -48,6 +48,20 @@
     119일을 통으로 평균내면 평일 기준 대비 중앙 -10.7%(범위 -25%~+47%)로
     어긋난다. am(07-09)·pm(17-19) 은 통근 시간대라 평일이 맞는 자다.
     주말분은 `board_day_we` 로 따로 남긴다 — 요일축을 도입할 때 쓴다.
+
+[6] 승차량도 노선처럼 원본 결측이 있다. (2026-08-13 수정)
+    정확도 재검증 중 다사5915(진안동, 인구 15,890명)의 예측오차가 가장 컸다.
+    추적해 보니 배정된 정류장 6개(반정아이파크·망포고 등, 전부 노선·배차 실측)가
+    경기도 승하차 원본에 **단 한 행도 없었다** — 수원 경계라 수원 쪽 집계로
+    빠진 것으로 보인다. "버스는 오는데 카드 데이터만 없다"와 "진짜로 승객이
+    없다"(TG·휴게소·차고지처럼 구조적으로 무정차)를 구분하지 않으면 후자를
+    지어내는 게 아니라 전자를 놓치는 방향으로 사각지대를 과소평가한다.
+    전수 조사: 노선·배차 실측인데 board_day=0 인 정류장 108개 중 60개는
+    이름 패턴(미정차·TG·휴게소·차고지·기점)으로 정상 판별되고, 나머지 48개
+    (영향 격자 29개)만 결측으로 보아 [3] 과 같은 방식(읍면동 중앙값)으로 채운다.
+    freq_imputed 판정이 board_day<=0 을 게이트로 쓰므로([3]), 이 대체는
+    반드시 그 판정보다 먼저 실행해야 한다 — 안 그러면 board_day 결측이
+    freq_imputed 오판정까지 연쇄로 일으킨다.
 """
 import csv
 import json
@@ -141,7 +155,8 @@ for s in read("stops_national_hwaseong.csv"):
                 "lon": round(lon, 6), "lat": round(lat, 6), "x": x, "y": y,
                 # 평일(wd)·주말(we) 을 따로 쌓는다 [5]. days 는 집계일수 세기용.
                 "board_wd": 0.0, "alight_wd": 0.0, "days_wd": set(),
-                "board_we": 0.0, "alight_we": 0.0, "days_we": set()}
+                "board_we": 0.0, "alight_we": 0.0, "days_we": set(),
+                "board_seen": False}   # 원본에 이 정류장 행이 단 한 번이라도 있었는가 [6]
 print(f"  좌표 있는 정류장 {len(stops):,}개")
 
 hit = miss = 0
@@ -151,6 +166,7 @@ for b in read("boarding_hwaseong.csv"):
         miss += 1
         continue
     hit += 1
+    s["board_seen"] = True
     d = b["승하차일자"]
     sfx = "we" if is_weekend(d) else "wd"
     s["board_" + sfx] += num(b["초승"])       # [4] 환승 제외 — 초승만이 새 통행이다
@@ -248,6 +264,30 @@ for s in stops.values():
     s["region"] = grid[i]["region"]
     s["grid_m"] = round(d, 1)
     s["n_routes"] = len(stop_routes.get(s["key"], ()))
+
+# [6] 승차량 결측 대체 — freq 대체([3], 바로 아래)보다 먼저 해야 한다.
+# TG·휴게소·차고지·기점·미정차 는 버스가 서지 않거나 승객을 안 태우는 지점이라
+# 원본에 없는 게 정상이다 — 대체 대상에서 뺀다.
+NONBOARDING_NAME = ("미정차", "TG", "휴게소", "차고지", "기점")
+bmed = defaultdict(list)
+for s in stops.values():
+    if s["board_seen"]:
+        bmed[s["region"]].append(s["board_day"])
+board_imputed = 0
+for s in stops.values():
+    if s["board_seen"] or any(k in s["name"] for k in NONBOARDING_NAME):
+        s["board_imputed"] = 0
+        continue
+    if s["key"] not in stop_freq:
+        s["board_imputed"] = 0   # 노선도 없는 곳은 board_day=0 그대로 — 진짜 무공급 후보
+        continue
+    board_imputed += 1
+    s["board_imputed"] = 1
+    v = sorted(bmed[s["region"]])
+    fill = v[len(v) // 2] if v else 0.0
+    s["board_day"] = fill
+    s["board_day_we"] = fill      # 주말분도 원본이 없으므로 같은 값으로 채운다
+print(f"  승차량 결측 정류장 {board_imputed:,}개(노선·배차 실측인데 원본에 없음)를 읍면동 중앙값으로 대체")
 
 # [3] 결측 대체 — 같은 읍면동에서 노선이 붙은 정류장들의 중앙값
 med = defaultdict(lambda: defaultdict(list))
@@ -394,7 +434,7 @@ print("=" * 66)
 print("[5] 저장")
 with open(D / "stops_hwaseong.csv", "w", encoding="utf-8-sig", newline="") as f:
     cols = ["key", "stop_id", "ars", "name", "lon", "lat", "grid_id", "region",
-            "board_day", "board_day_we", "alight_day",
+            "board_day", "board_day_we", "alight_day", "board_imputed",
             "n_routes", "freq_imputed"] + [f"freq_{p}" for p, _, _ in PERIODS]
     w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
