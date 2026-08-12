@@ -149,28 +149,62 @@ for p in ["am", "night"]:
 # 발표에서 "모델이 찍은 곳이 실제로 문제인 곳" 을 말할 때 근거가 되는 부분이라
 # 추정을 섞으면 안 된다.
 QUALITATIVE = [
-    {"region": "새솔동", "rank": "출근 1·4위", "verified": True,
+    {"region": "새솔동", "verified": True,
      "finding": "송산그린시티. 안산 생활권인데 연결 시내버스가 안산 업체 10번 하나뿐. "
                 "화성시가 동탄·병점권 위주로 투자해 노선 신설이 지연된다고 보도됨",
      "source": "경기일보 2018-05-02 / 나무위키 송산그린시티·새솔동"},
-    {"region": "비봉면", "rank": "심야 신규 need", "verified": True,
+    {"region": "비봉면", "verified": True,
      "finding": "비봉지구 마을버스 막차가 22시경 종료. 인구 증가 대비 대중교통 개선 지연",
      "source": "나무위키 가축수송(교통)/사례/버스/경기도"},
-    {"region": "화산동·정남면", "rank": "심야 1·5위", "verified": False,
+    {"region": "화산동", "verified": False,
      "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. "
-                "다만 야간 무공급(운행 0회) 격자로 실측되며 화산동 다사5612 는 인구 6,872",
+                "다만 심야 need 격자로 실측된다",
+     "source": None},
+    {"region": "정남면", "verified": False,
+     "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. "
+                "다만 심야 need 격자로 실측된다",
      "source": None},
 ]
 
+
+def _ranks(region):
+    """그 읍면동 격자가 실제로 몇 위인지 산출물에서 직접 뽑는다.
+
+    예전에는 순위를 문자열로 박아 두었는데("출근 1·4위"), 09_augment_routes 로
+    타 시군 면허 노선을 보강하자 공급이 바뀌어 순위가 통째로 달라졌는데도
+    표기는 그대로 남아 실제 산출과 어긋났다. 산출에서 계산하면 안 낡는다."""
+    out = {}
+    for p in ("am", "night"):
+        sub = gm[(gm.period == p) & (gm.priority > 0)].sort_values(
+            "priority", ascending=False).reset_index(drop=True)
+        hit = [i + 1 for i, r in enumerate(sub.itertuples()) if r.region == region]
+        out[p] = hit[:2]
+    return out
+
 print("=" * 64)
 print("[3-1] 정성 대조 — 공개 자료에서 확인된 것")
-# ⚠️ QUALITATIVE 의 순위 표기("출근 1·4위" 등)는 1km 격자에서 확인한 기록이다.
-#    격자 크기를 바꿔 재실행하면 위 [3] Top5 와 대조해 순위 표기를 갱신할 것.
+# 순위는 매 실행마다 산출물에서 계산한다(_ranks). 하드코딩하면 데이터가 바뀔 때
+# 조용히 낡는다 — 실제로 노선 보강 뒤 표기와 산출이 어긋난 적이 있다.
+top5_hit = 0
 for q in QUALITATIVE:
-    print(f"  {'✅' if q['verified'] else '⬜'} {q['region']:12} ({q['rank']})")
+    rk = _ranks(q["region"])
+    q["rank"] = " · ".join(
+        f"{'출근' if p == 'am' else '심야'} " + (
+            "·".join(f"{i}위" for i in rk[p]) if rk[p] else "우선순위 밖")
+        for p in ("am", "night"))
+    q["rankDetail"] = rk
+    in_top5 = any(i <= 5 for p in ("am", "night") for i in rk[p])
+    q["inTop5"] = in_top5
+    top5_hit += in_top5
+    print(f"  {'✅' if q['verified'] else '⬜'} {q['region']:10} ({q['rank']})"
+          f"{'  ← Top5' if in_top5 else ''}")
     print(f"       {q['finding']}")
 hit = sum(q["verified"] for q in QUALITATIVE)
-print(f"\n  확인 {hit}/{len(QUALITATIVE)}건 — 목표는 Top5 중 3곳 이상 일치")
+print(f"\n  공개 자료로 확인 {hit}/{len(QUALITATIVE)}건 · 그중 현재 Top5 안 {top5_hit}건")
+if top5_hit < 2:
+    print("  ⚠️ 정성 대조 대상이 Top5 밖으로 밀렸습니다 — 09_augment_routes 로 공급이")
+    print("     재산정되면서 순위가 바뀐 결과입니다. 현재 Top5 읍면동을 기준으로")
+    print("     공개 자료를 다시 조사해 목록을 갱신하세요(추정으로 채우지 말 것).")
 
 print("=" * 64)
 print("[4] 저장 · 판정")

@@ -91,9 +91,15 @@ def _json(payload) -> Response:
     """큰 응답의 직렬화 우회 — FastAPI 기본 jsonable_encoder 는 값 하나하나를
     재귀 검사해서, 500m 격자(3,144셀×4시간대)에서는 /simulations 인코딩에만
     39초가 걸렸다(실측). json.dumps 직행이면 같은 응답이 0.1초대다.
-    numpy 스칼라가 섞여 들어오면 .item() 으로 강등한다."""
+    numpy 스칼라가 섞여 들어오면 .item() 으로 강등한다.
+
+    allow_nan=False 는 일부러 남긴다 — 기본값(True)이면 NaN/Infinity 가
+    JSON 문법에 없는 리터럴로 본문에 실려 200 으로 나가고, 브라우저의
+    JSON.parse 가 원인 모를 예외를 던진다. Starlette 기본 JSONResponse 도
+    allow_nan=False 라, 이 직행 경로가 그 방어를 조용히 걷어내지 않게 한다."""
     return Response(
         content=json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                           allow_nan=False,
                            default=lambda o: o.item() if hasattr(o, "item") else str(o)),
         media_type="application/json; charset=utf-8",
     )
@@ -150,16 +156,23 @@ def _chk_period(p: str):
 def _make_reason(cell: dict) -> str:
     d, s, cov, action = cell["demand"], cell["supply"], cell["coverage"], cell["action"]
     if action == "NEW_STOP":
-        return f"수요지수 {d} 대비 공급지수 {s}, 가장 가까운 정류장 도보권 밖 (커버리지 {cov:.2f})"
+        return (f"수요지수 {d} 대비 공급지수 {s}, 가장 가까운 정류장이 300~510m "
+                f"(커버리지 {cov:.2f}) — 노선은 지나지만 정류장이 멀다")
     if action == "DRT":
-        return f"수요지수 {d} 대비 공급지수 {s}, 노선 미연결 지역 (커버리지 {cov:.2f}) — 수요응답형 필요"
-    return f"수요지수 {d} 대비 공급지수 {s}, 정류장 도보권 내이나 배차 부족"
+        return (f"수요지수 {d} 대비 공급지수 {s}, 가장 가까운 정류장이 510m 밖 "
+                f"(커버리지 {cov:.2f}) — 노선 미연결, 수요응답형 필요")
+    return f"수요지수 {d} 대비 공급지수 {s}, 정류장 도보권(300m) 내이나 배차 부족"
 
 
 def _derive_action(coverage: float, quadrant: str) -> str:
-    if quadrant == "drt":
+    """배치 후 갱신된 coverage 로 수단 배지를 다시 매긴다.
+
+    04_model.py 의 action 산출과 **같은 경계**를 쓴다(0.15 / 0.50). 그래야
+    지도 배지와 POST /recommendations 의 배타 게이트가 같은 말을 한다.
+    quadrant 는 수요·공급 위치를 나타내는 별개 축이라 여기서 보지 않는다."""
+    if coverage < 0.15:
         return "DRT"
-    if coverage < 0.42:
+    if coverage < 0.5:
         return "NEW_STOP"
     return "ADD_FREQ"
 

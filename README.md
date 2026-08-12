@@ -122,7 +122,7 @@ python analysis/check_api.py
 | **`04_model.py` 모델 산출** | ✅ **완료.** D·S·MI·4분면·우선순위 — need **28/28/30/42** (am/day/pm/night) · 야간 무공급 구제 포함 |
 | **`05_simulate.py` 시뮬레이션** | ✅ 완료 (팀원) · 절대 가드 동기화 |
 | **`05_load.py` JSON 산출** | ✅ **완료.** `server/static/` 13파일 · DB 없이 동작 · `/data` 로도 서빙 |
-| **검증 (`07_validate.py`)** | ✅ **완료.** 홀드아웃 로그 R² **0.801** (목표 0.6) · 배차 탄력성 +0.431 |
+| **검증 (`07_validate.py`)** | ✅ **완료.** 홀드아웃 로그 R² **0.842** (목표 0.6) · 배차 탄력성 +0.608 |
 | **API 서버 (`server/main.py`)** | ✅ **완료.** FastAPI 10개 엔드포인트 · 시뮬/추천/보고서 |
 | PostgreSQL | ⬜ **미사용.** 정적 JSON 으로 동작 — 이유는 [BACKEND.md §0-1](docs/BACKEND.md) |
 

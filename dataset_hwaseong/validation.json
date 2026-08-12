@@ -64,7 +64,7 @@
     "region": "동탄7동",
     "gridId": "다사6707",
     "priority": 2.4616,
-    "action": "NEW_STOP",
+    "action": "DRT",
     "lat": 37.16568,
     "lon": 127.13394
    },
@@ -73,7 +73,7 @@
     "region": "봉담읍",
     "gridId": "다사4814",
     "priority": 1.8643,
-    "action": "NEW_STOP",
+    "action": "DRT",
     "lat": 37.22792,
     "lon": 126.91946
    },
@@ -82,7 +82,7 @@
     "region": "동탄6동",
     "gridId": "다사6311",
     "priority": 1.8417,
-    "action": "ADD_FREQ",
+    "action": "NEW_STOP",
     "lat": 37.20159,
     "lon": 127.08869
    },
@@ -91,7 +91,7 @@
     "region": "동탄9동",
     "gridId": "다사6710",
     "priority": 1.7824,
-    "action": "NEW_STOP",
+    "action": "DRT",
     "lat": 37.19272,
     "lon": 127.13381
    },
@@ -100,7 +100,7 @@
     "region": "남양읍",
     "gridId": "다사4010",
     "priority": 1.743,
-    "action": "ADD_FREQ",
+    "action": "NEW_STOP",
     "lat": 37.19139,
     "lon": 126.8296
    }
@@ -111,7 +111,7 @@
     "region": "진안동",
     "gridId": "다사5914",
     "priority": 2.9971,
-    "action": "DRT",
+    "action": "ADD_FREQ",
     "lat": 37.22847,
     "lon": 127.04345
    },
@@ -129,7 +129,7 @@
     "region": "동탄9동",
     "gridId": "다사6708",
     "priority": 2.4099,
-    "action": "DRT",
+    "action": "ADD_FREQ",
     "lat": 37.1747,
     "lon": 127.13389
    },
@@ -156,24 +156,64 @@
  "qualitative": [
   {
    "region": "새솔동",
-   "rank": "출근 1·4위",
    "verified": true,
    "finding": "송산그린시티. 안산 생활권인데 연결 시내버스가 안산 업체 10번 하나뿐. 화성시가 동탄·병점권 위주로 투자해 노선 신설이 지연된다고 보도됨",
-   "source": "경기일보 2018-05-02 / 나무위키 송산그린시티·새솔동"
+   "source": "경기일보 2018-05-02 / 나무위키 송산그린시티·새솔동",
+   "rank": "출근 우선순위 밖 · 심야 우선순위 밖",
+   "rankDetail": {
+    "am": [],
+    "night": []
+   },
+   "inTop5": false
   },
   {
    "region": "비봉면",
-   "rank": "심야 신규 need",
    "verified": true,
    "finding": "비봉지구 마을버스 막차가 22시경 종료. 인구 증가 대비 대중교통 개선 지연",
-   "source": "나무위키 가축수송(교통)/사례/버스/경기도"
+   "source": "나무위키 가축수송(교통)/사례/버스/경기도",
+   "rank": "출근 우선순위 밖 · 심야 9위·40위",
+   "rankDetail": {
+    "am": [],
+    "night": [
+     9,
+     40
+    ]
+   },
+   "inTop5": false
   },
   {
-   "region": "화산동·정남면",
-   "rank": "심야 1·5위",
+   "region": "화산동",
    "verified": false,
-   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 야간 무공급(운행 0회) 격자로 실측되며 화산동 다사5612 는 인구 6,872",
-   "source": null
+   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 심야 need 격자로 실측된다",
+   "source": null,
+   "rank": "출근 18위 · 심야 24위·34위",
+   "rankDetail": {
+    "am": [
+     18
+    ],
+    "night": [
+     24,
+     34
+    ]
+   },
+   "inTop5": false
+  },
+  {
+   "region": "정남면",
+   "verified": false,
+   "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 심야 need 격자로 실측된다",
+   "source": null,
+   "rank": "출근 24위 · 심야 16위·23위",
+   "rankDetail": {
+    "am": [
+     24
+    ],
+    "night": [
+     16,
+     23
+    ]
+   },
+   "inTop5": false
   }
  ]
 }

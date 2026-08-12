@@ -119,7 +119,11 @@ for rid, it in alive.items():
         "last_time": str(it.get("upLastTime") or "").replace(":", ""),
         "peek_alloc": str(it.get("peekAlloc") or ""),
         "npeek_alloc": str(it.get("nPeekAlloc") or ""),
-        "night_alloc": "0",
+        # nightAlloc 은 같은 응답에 들어 있다 — 01_fetch.py 도 이 필드를 읽는다.
+        # 예전에 "0" 을 박아 두었더니 03_join 의 night→npeek 폴백이 걸려,
+        # 심야 배차가 비첨두 배차로 대체 추정됐다. 표본에서 nightAlloc 은 항상
+        # nPeekAlloc 이상(=배차간격이 더 김)이라 심야 공급이 과대 산정된다.
+        "night_alloc": str(it.get("nightAlloc") or ""),
         "up_first": str(it.get("upFirstTime") or ""),
         "up_last": str(it.get("upLastTime") or ""),
         "region": str(it.get("regionName") or ""),

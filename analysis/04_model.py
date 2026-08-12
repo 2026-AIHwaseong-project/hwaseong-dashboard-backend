@@ -177,11 +177,19 @@ def main():
         e_clip = np.minimum(sub["elderly_ratio"].values, 1.0)
         pri = np.where(m_need, mi_raw * (0.35 + pw) * (1 + ELD_COEF * e_clip), 0.0)
 
-        # action: drt/무운행 need → DRT / 접근 열위 → 신설 / 그 외 증편
-        freq_v = sub["freq"].values
-        action = np.where(cov < 0.42, "NEW_STOP", "ADD_FREQ").astype(object)
-        action[m_drt] = "DRT"
-        action[m_need & (freq_v < 2.0)] = "DRT"
+        # action — 수단은 coverage 로 **배타 결정**한다 (docs/BACKEND.md §6.2).
+        #   cov ≥ 0.50 (정류장 ≤300m)   도보권 안인데 버스가 안 온다 → 증차
+        #   0.15 ≤ cov < 0.50 (300~510m) 노선은 지나는데 정류장이 멀다 → 신설
+        #   cov < 0.15 (>510m)          노선 자체가 없다시피 하다 → 똑버스
+        #
+        # 예전 규칙(cov<0.42 신설 + 사분면 drt + need&freq<2 → DRT)은 서버의
+        # 추천 게이트(0.15/0.50)와 기준이 달라, 지도가 "똑버스"라고 표시한 격자를
+        # 클릭해 추천을 돌리면 정류장 신설이나 증차가 나왔다. 심야 기준으로
+        # DRT 표시 111칸 중 53칸이 그랬다. 화면 배지와 추천이 같은 말을 하도록
+        # 한쪽으로 통일한 것이고, 판정식(cov600)은 양쪽이 이미 동일하다.
+        # 사분면(quadrant)은 수요·공급 위치를 나타내는 별개 축이라 그대로 둔다.
+        action = np.where(cov >= 0.5, "ADD_FREQ",
+                          np.where(cov >= 0.15, "NEW_STOP", "DRT")).astype(object)
 
         # bins — 기준선 5분위 경계 고정
         K["dBinT"] = [pctl(D, q) for q in (0.2, 0.4, 0.6, 0.8)]
