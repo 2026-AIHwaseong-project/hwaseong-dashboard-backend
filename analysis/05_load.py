@@ -175,6 +175,28 @@ for h in range(24):
     else:
         hourly_ratio[h] = 0.0
 
+# 승하차를 시간에 나누는 배율은 교통카드 OD 실측으로 바꾼다 (파일이 있을 때만).
+# 유동인구는 '거기 사람이 있다'를 재는 값이라 버스의 출퇴근 첨두를 못 잡는다 —
+# 실측과 상관계수 0.42, 출근(07-09)은 7.7% 대 18.4% 로 2.4배 어긋난다.
+# 모델의 승차량도 같은 실측으로 교정하므로(03_join [4-1]) 같은 B 를 두 곳이
+# 서로 다른 자로 나누지 않는다. 잠재수요는 이 배율을 쓰지 않는다.
+HOURLY_SRC = "연령가중 유동인구 시간배율"
+_od_path = D_DIR / "od_quarter.csv"
+if _od_path.exists():
+    _od = pd.read_csv(_od_path)
+    _od["hour"] = pd.to_numeric(_od["hour"], errors="coerce")
+    _agg = _od.groupby("hour")["trips"].sum()
+    _tot = sum(float(_agg.get(h, 0.0)) for h in HOURS_LIST)
+    if _tot > 0:
+        hourly_ratio = {h: (float(_agg.get(h, 0.0)) / _tot if h in HOURS_LIST else 0.0)
+                        for h in range(24)}
+        HOURLY_SRC = "교통카드 OD 15분단위 실측 시간분포"
+        print(f"  시간배율: {HOURLY_SRC} 사용 (유동인구 대체)")
+    else:
+        print("  시간배율: OD 합계가 0 — 유동인구 기준 유지")
+else:
+    print("  시간배율: od_quarter.csv 없음 — 유동인구 기준 유지")
+
 # ── 3. 정류장 ARS → 일평균 승하차 집계 (boarding_hwaseong) ─────────────────
 print("승하차 집계 중...")
 
@@ -488,7 +510,7 @@ for _, row in stops.iterrows():
         "kind":               kind,
         "routes":             routes_list,
         "isEstimated":        True,
-        "estimationMethod":   "일자별 승하차를 연령가중 유동인구 시간배율로 안분",
+        "estimationMethod":   f"일자별 승하차를 {HOURLY_SRC}로 안분",
         "hours":              HOURS_LIST,
         "boardings":          boardings_hr,
         "alightings":         alightings_hr,
@@ -641,8 +663,11 @@ meta = {
         },
         "boardingHourly": {
             "level": "estimated", "label": "시간대별 승하차",
-            "method": "일자별 승하차를 연령가중 유동인구 시간배율로 안분",
-            "note": "원자료에 시간대 정보가 없습니다.",
+            "method": f"일자별 승하차를 {HOURLY_SRC}로 안분",
+            "note": ("원자료에 시간대 정보가 없습니다. "
+                     + ("시간분포는 교통카드 OD(15분단위) 실측을 씁니다."
+                        if "OD" in HOURLY_SRC else
+                        "시간분포는 유동인구 추정입니다.")),
         },
         "flowHourly": {
             "level": "observed", "label": "시간대별 유동인구",

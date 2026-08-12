@@ -109,6 +109,35 @@ def read_plus(name):
     return read(name)
 
 
+def od_period_share():
+    """교통카드 OD(10_fetch_od.py)에서 시간대별 통행 비중을 뽑는다.
+
+    승차량 B 를 시간대에 나누는 배율로 쓴다. 지금까지는 유동인구 시간배율이
+    유일한 시간 신호였는데, 그건 '거기 사람이 있다'를 재는 값이라 버스
+    이용의 출퇴근 첨두를 못 잡는다 — 실측과 상관계수가 0.42 뿐이고
+    출근(07-09)은 7.7% 대 18.4% 로 2.4배 어긋난다.
+
+    ⚠️ 잠재수요 P 에는 쓰지 않는다. 심야 버스가 없는 곳은 태그가 안 찍혀
+    OD 가 낮게 나오는데, 그걸 '심야 수요 없음' 으로 읽으면 우리가 찾으려는
+    심야 공백을 스스로 지워 버린다. P 는 유동인구 기준 그대로 둔다.
+
+    파일이 없으면 None — 10 을 안 돌린 팀원도 파이프라인이 그대로 돈다."""
+    p = D / "od_quarter.csv"
+    if not p.exists():
+        return None
+    hr = defaultdict(float)
+    for x in csv.DictReader(open(p, encoding="utf-8-sig")):
+        try:
+            hr[int(x["hour"])] += float(x["trips"] or 0)
+        except (TypeError, ValueError):
+            continue          # 시간·통행수가 비어 있는 행은 버린다
+    tot = sum(hr.values())
+    if tot <= 0:
+        return None
+    return {pid: sum(hr[h] for h in range(h0, h1)) / tot
+            for pid, h0, h1 in PERIODS}
+
+
 def num(v, default=0.0):
     try:
         f = float(str(v).strip())
@@ -425,14 +454,33 @@ for r in rows:
     g = by_grid[r["grid_id"]]
     pid = r["period"]
     r["potential"] = round(sum(g[b] * share[(b, pid)] for b in AGE), 2)
-    # 승차량에도 같은 배율을 쓴다. 시간대별 승하차 원자료가 없으므로 이게 유일한
-    # 시간 신호이고, B 와 P 에 같은 자를 대야 D 의 두 성분이 어긋나지 않는다.
+    # 연령가중 시간배율. 격자마다 연령 구성이 달라 값이 다르다.
     # ⚠️ 추정치다. API 응답에 isEstimated: true 로 표시해야 한다.
-    pshare = sum(g[b] * share[(b, pid)] for b in AGE) / (g["pop"] or 1)
-    r["boardings"] = round(r["board_day"] * pshare, 3)
+    r["_pshare"] = sum(g[b] * share[(b, pid)] for b in AGE) / (g["pop"] or 1)
     r["elderly_ratio"] = g["elderly_ratio"]
     r["workers"] = g["workers"]
     r["pop"] = g["pop"]
+
+# [4-1] 승차량의 시간 신호만 교통카드 OD 실측으로 교정한다.
+# 격자별 연령 구성에서 오는 상대차는 그대로 두고(=_pshare 유지), 시 전체 합이
+# OD 실측 비중과 맞도록 시간대마다 한 배율만 곱한다. 잠재수요 P 는 안 건드린다.
+odsh = od_period_share()
+kfac = {pid: 1.0 for pid, _, _ in PERIODS}
+if odsh:
+    for pid, _, _ in PERIODS:
+        sub = [r for r in rows if r["period"] == pid]
+        base = sum(r["board_day"] for r in sub)
+        cur = (sum(r["board_day"] * r["_pshare"] for r in sub) / base) if base else 0.0
+        if cur > 0:
+            kfac[pid] = odsh[pid] / cur
+    print("  [OD] 승차량 시간배율 교정 — 유동인구 → 교통카드 실측")
+    for pid, _, _ in PERIODS:
+        print(f"    {pid:6s} ×{kfac[pid]:5.2f}  (OD 실측 {odsh[pid] * 100:4.1f}%)")
+else:
+    print("  [OD] od_quarter.csv 없음 — 승차량 시간배율은 유동인구 기준 그대로")
+
+for r in rows:
+    r["boardings"] = round(r["board_day"] * r["_pshare"] * kfac[r["period"]], 3)
 
 print("  시간대별 합 (연령가중 배율 적용)")
 for pid, h0, h1 in PERIODS:
