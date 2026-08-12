@@ -186,19 +186,15 @@ boarding["_ars_str"] = (
     .astype(int)
     .astype(str)
 )
-# NaN 제거 후 그룹 집계
+# NaN 제거 — 아래 [11] 의 승하차 매칭률 산출에만 쓴다.
+#
+# 예전에는 여기서 원본을 ARS 로 다시 집계해 프로파일 카드의 승하차를 만들었다.
+# 그런데 03_join 은 정류소ID·초승(환승 제외)·평일 기준이고 이쪽은 ARS·승차합계·
+# 전체요일 기준이라, 같은 정류장이 화면마다 다른 값을 냈다 — 시 전체로 재면
+# 171,031 대 151,978 로 12.5% 어긋났다. 수요 정의를 바꾼 커밋(9c6bc88)이
+# 03_join 만 고치고 여기를 빠뜨린 것이다.
+# 수요 정의는 03_join 한 곳에서만 정한다. 여기서는 그 결과를 읽어 쓴다.
 boarding_valid = boarding.dropna(subset=["_ars_str"])
-board_agg = (
-    boarding_valid
-    .groupby("_ars_str")
-    .agg(
-        board_sum=("승차합계", "sum"),
-        alight_sum=("하차", "sum"),
-        n_dates=("승하차일자", "nunique"),
-    )
-)
-board_agg["board_day"]  = board_agg["board_sum"]  / board_agg["n_dates"]
-board_agg["alight_day"] = board_agg["alight_sum"] / board_agg["n_dates"]
 
 # ── 4. route_stops → 화성시 정류장-노선 매핑 ────────────────────────────────
 print("노선-정류장 매핑 중...")
@@ -459,27 +455,28 @@ peak_indices = [i for i, h in enumerate(HOURS_LIST) if h in peak_hours]
 
 profiles = {}
 for _, row in stops.iterrows():
-    sid = str(row["stop_id"])
-    ars = row["ars"]
-    if pd.isna(ars):
+    # stop_id 가 프로파일의 키다. 없으면 API 로 꺼낼 방법이 없어 건너뛴다
+    # (현재 292개 — 좌표만 있고 ID·ARS 가 둘 다 비어 있는 정류장).
+    if pd.isna(row["stop_id"]):
         continue
-    ars_str = str(int(float(ars)))
+    sid = str(row["stop_id"])
 
     kind = stop_kind(safe_int(row["n_routes"]), row.get("region_kind"))
     routes_list = stop_to_routes.get(sid, [])
 
-    # 일평균 승하차: boarding_hwaseong 우선, 없으면 stops_hwaseong fallback
-    if ars_str in board_agg.index:
-        bd_row = board_agg.loc[ars_str]
-        board_total  = safe_float(bd_row["board_day"])
-        alight_total = safe_float(bd_row["alight_day"])
-    else:
-        board_total  = safe_float(row.get("board_day", 0))
-        alight_total = safe_float(row.get("alight_day", 0))
+    # 일평균 승하차 — 03_join 이 계산한 값(초승·평일·정류소ID 기준)을 그대로 쓴다.
+    # 결측 대체분(board_imputed=1)도 여기로 함께 따라온다.
+    board_total  = safe_float(row.get("board_day", 0))
+    alight_total = safe_float(row.get("alight_day", 0))
 
-    # 시간대별 승하차
-    boardings_hr  = [round(board_total  * hourly_ratio[h]) for h in HOURS_LIST]
-    alightings_hr = [round(alight_total * hourly_ratio[h]) for h in HOURS_LIST]
+    # 시간대별 승하차 — 정수로 반올림하면 안 된다.
+    # 시간배율은 19개 시간(5~23시)에 나뉘므로 한 시간 몫이 평균 5% 안팎이다.
+    # 일평균 5명인 정류장은 시간당 0.26명이라 round() 를 걸면 19칸이 전부 0 이 되고
+    # 카드가 통째로 백지가 된다 — 기록이 없어서가 아니라 반올림으로 사라진 것이다.
+    # 실측: 2,866개 중 1,263개가 백지였고 그중 1,015개는 실제 승차 기록이 있었다.
+    # 일평균 자체가 소수인 값이므로 시간 몫도 소수로 두는 게 맞다.
+    boardings_hr  = [round(board_total  * hourly_ratio[h], 2) for h in HOURS_LIST]
+    alightings_hr = [round(alight_total * hourly_ratio[h], 2) for h in HOURS_LIST]
 
     # 피크 비율
     peak_board = sum(boardings_hr[i] for i in peak_indices)
@@ -496,8 +493,10 @@ for _, row in stops.iterrows():
         "boardings":          boardings_hr,
         "alightings":         alightings_hr,
         "summary": {
-            "boardingsPerDay":  int(round(board_total)),
-            "alightingsPerDay": int(round(alight_total)),
+            # 소수 한 자리까지 남긴다. int 로 자르면 일평균 0.4명인 정류장이
+            # '일 승차 0명' 이 되어 기록이 없는 정류장과 구분되지 않는다.
+            "boardingsPerDay":  round(board_total, 1),
+            "alightingsPerDay": round(alight_total, 1),
             "peakSharePct":     peak_share,
         },
     }

@@ -269,10 +269,18 @@ for s in stops.values():
 # TG·휴게소·차고지·기점·미정차 는 버스가 서지 않거나 승객을 안 태우는 지점이라
 # 원본에 없는 게 정상이다 — 대체 대상에서 뺀다.
 NONBOARDING_NAME = ("미정차", "TG", "휴게소", "차고지", "기점")
-bmed = defaultdict(list)
+bmed, amed = defaultdict(list), defaultdict(list)
 for s in stops.values():
     if s["board_seen"]:
         bmed[s["region"]].append(s["board_day"])
+        amed[s["region"]].append(s["alight_day"])
+
+
+def _median(vals):
+    v = sorted(vals)
+    return v[len(v) // 2] if v else 0.0
+
+
 board_imputed = 0
 for s in stops.values():
     if s["board_seen"] or any(k in s["name"] for k in NONBOARDING_NAME):
@@ -283,10 +291,12 @@ for s in stops.values():
         continue
     board_imputed += 1
     s["board_imputed"] = 1
-    v = sorted(bmed[s["region"]])
-    fill = v[len(v) // 2] if v else 0.0
+    fill = _median(bmed[s["region"]])
     s["board_day"] = fill
     s["board_day_we"] = fill      # 주말분도 원본이 없으므로 같은 값으로 채운다
+    # 하차도 같은 이유로 결측이다. 승차만 채우면 '승차는 있는데 하차가 0' 인
+    # 정류장이 32개 새로 생기고, 프로파일 카드에서 하차 막대만 통째로 빈다.
+    s["alight_day"] = _median(amed[s["region"]])
 print(f"  승차량 결측 정류장 {board_imputed:,}개(노선·배차 실측인데 원본에 없음)를 읍면동 중앙값으로 대체")
 
 # [3] 결측 대체 — 같은 읍면동에서 노선이 붙은 정류장들의 중앙값
