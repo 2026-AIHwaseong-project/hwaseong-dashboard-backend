@@ -76,11 +76,15 @@ from shapely.geometry import shape
 from shapely.ops import transform, unary_union
 from shapely.strtree import STRtree
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import od_curve                                    # noqa: E402  (경로 삽입 후)
+
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent.parent
 D = ROOT / "dataset_hwaseong"
+OD_HOURS = list(range(5, 24))
 
 SIGUNGU = "41590"          # 화성시 행정표준코드 (프론트 계약의 id 접두어)
 WALK_M = 800               # 도보권. 승하차 안분 반경 겸 커버리지 임계거리
@@ -109,33 +113,26 @@ def read_plus(name):
     return read(name)
 
 
-def od_period_share():
-    """교통카드 OD(10_fetch_od.py)에서 시간대별 통행 비중을 뽑는다.
+def od_shares():
+    """승차량 B 를 시간대에 나눌 비중. (시 전체, {법정동: 비중}, ARS→법정동)
 
-    승차량 B 를 시간대에 나누는 배율로 쓴다. 지금까지는 유동인구 시간배율이
-    유일한 시간 신호였는데, 그건 '거기 사람이 있다'를 재는 값이라 버스
-    이용의 출퇴근 첨두를 못 잡는다 — 실측과 상관계수가 0.42 뿐이고
-    출근(07-09)은 7.7% 대 18.4% 로 2.4배 어긋난다.
+    지금까지는 유동인구 시간배율이 유일한 시간 신호였는데, 그건 '거기 사람이
+    있다'를 재는 값이라 버스 이용의 출퇴근 첨두를 못 잡는다 — 실측과 상관계수
+    0.42, 출근(07-09)은 7.7% 대 18.4% 로 2.4배 어긋난다. 게다가 실제 타이밍은
+    동마다 달라서(새솔동 43.9% ~ 석우동 10.1%) 시 전체 곡선 하나로는 부족하다.
 
     ⚠️ 잠재수요 P 에는 쓰지 않는다. 심야 버스가 없는 곳은 태그가 안 찍혀
     OD 가 낮게 나오는데, 그걸 '심야 수요 없음' 으로 읽으면 우리가 찾으려는
     심야 공백을 스스로 지워 버린다. P 는 유동인구 기준 그대로 둔다.
 
-    파일이 없으면 None — 10 을 안 돌린 팀원도 파이프라인이 그대로 돈다."""
-    p = D / "od_quarter.csv"
-    if not p.exists():
-        return None
-    hr = defaultdict(float)
-    for x in csv.DictReader(open(p, encoding="utf-8-sig")):
-        try:
-            hr[int(x["hour"])] += float(x["trips"] or 0)
-        except (TypeError, ValueError):
-            continue          # 시간·통행수가 비어 있는 행은 버린다
-    tot = sum(hr.values())
-    if tot <= 0:
-        return None
-    return {pid: sum(hr[h] for h in range(h0, h1)) / tot
-            for pid, h0, h1 in PERIODS}
+    OD 가 없으면 (None, {}, {}) — 10 을 안 돌린 팀원도 파이프라인이 그대로 돈다."""
+    city_curve, emd_curves = od_curve.hourly_by_emd(D, OD_HOURS)
+    if city_curve is None:
+        return None, {}, {}
+    city = od_curve.period_share(city_curve, OD_HOURS, PERIODS)
+    per = {e: od_curve.period_share(c, OD_HOURS, PERIODS)
+           for e, c in emd_curves.items()}
+    return city, per, od_curve.load_stop_emd(D)
 
 
 def num(v, default=0.0):
@@ -363,7 +360,11 @@ slist = list(stops.values())
 stree = STRtree([sgeom.Point(s["x"], s["y"]) for s in slist])
 gtree = STRtree([sgeom.Point(g["x"], g["y"]) for g in grid])
 
+# 승차량의 시간분포는 정류장이 속한 법정동의 OD 곡선을 따른다. 승차량과 같은
+# 가중치로 함께 쌓아, 두 동에 걸친 격자는 실제로 승객이 온 만큼 섞인 곡선을 받는다.
+OD_CITY_PS, OD_EMD_PS, ARS2EMD = od_shares()
 board_g = defaultdict(float)
+bshare_g = defaultdict(lambda: defaultdict(float))
 freq_g = defaultdict(lambda: defaultdict(float))
 lost = 0
 for s in slist:
@@ -375,9 +376,13 @@ for s in slist:
         near = [(i, min(d, WALK_M - 1))]
         lost += 1
     wsum = sum(1 - d / WALK_M for _, d in near) or 1.0
+    ps = OD_EMD_PS.get(ARS2EMD.get(s["ars"], ""), OD_CITY_PS) if OD_CITY_PS else None
     for i, d in near:
         w = (1 - d / WALK_M) / wsum
         board_g[grid[i]["grid_id"]] += s["board_day"] * w
+        if ps:
+            for pid, _, _ in PERIODS:
+                bshare_g[grid[i]["grid_id"]][pid] += s["board_day"] * w * ps[pid]
         for pid, _, _ in PERIODS:
             freq_g[grid[i]["grid_id"]][pid] += stop_freq[s["key"]][pid] * (1 - d / WALK_M)
 if lost:
@@ -461,26 +466,31 @@ for r in rows:
     r["workers"] = g["workers"]
     r["pop"] = g["pop"]
 
-# [4-1] 승차량의 시간 신호만 교통카드 OD 실측으로 교정한다.
-# 격자별 연령 구성에서 오는 상대차는 그대로 두고(=_pshare 유지), 시 전체 합이
-# OD 실측 비중과 맞도록 시간대마다 한 배율만 곱한다. 잠재수요 P 는 안 건드린다.
-odsh = od_period_share()
-kfac = {pid: 1.0 for pid, _, _ in PERIODS}
-if odsh:
+# [4-1] 승차량의 시간분포는 교통카드 OD 실측을 그대로 쓴다.
+#
+# 연령가중 유동인구 배율(_pshare)은 시간대별 승하차 원자료가 없던 시절의 대리
+# 지표였다. OD 는 그 타이밍을 동 단위로 직접 관측하므로 대리지표가 필요 없다 —
+# 관측값이 있는데 추정치를 곱할 이유가 없다. OD 표본이 없는 동(승차량 기준
+# 16.7%)만 시 전체 곡선으로 떨어지고, OD 자체가 없으면 예전 방식으로 돌아간다.
+if OD_CITY_PS:
+    covered = 0.0
+    for r in rows:
+        gid, pid = r["grid_id"], r["period"]
+        b = board_g[gid]
+        # 격자에 실제로 승차가 배분됐으면 그 격자가 받은 동별 곡선의 가중평균,
+        # 아니면(승차 0) 시 전체 곡선.
+        sh = (bshare_g[gid][pid] / b) if b > 0 else OD_CITY_PS[pid]
+        r["boardings"] = round(r["board_day"] * sh, 3)
+        if pid == "am" and b > 0:
+            covered += b
+    nd = sum(1 for e in OD_EMD_PS if e)
+    print(f"  [OD] 승차량 시간분포 = 교통카드 실측 (법정동 {nd}개 곡선 · 나머지는 시 전체)")
     for pid, _, _ in PERIODS:
-        sub = [r for r in rows if r["period"] == pid]
-        base = sum(r["board_day"] for r in sub)
-        cur = (sum(r["board_day"] * r["_pshare"] for r in sub) / base) if base else 0.0
-        if cur > 0:
-            kfac[pid] = odsh[pid] / cur
-    print("  [OD] 승차량 시간배율 교정 — 유동인구 → 교통카드 실측")
-    for pid, _, _ in PERIODS:
-        print(f"    {pid:6s} ×{kfac[pid]:5.2f}  (OD 실측 {odsh[pid] * 100:4.1f}%)")
+        print(f"    {pid:6s} 시 전체 {OD_CITY_PS[pid] * 100:4.1f}%")
 else:
     print("  [OD] od_quarter.csv 없음 — 승차량 시간배율은 유동인구 기준 그대로")
-
-for r in rows:
-    r["boardings"] = round(r["board_day"] * r["_pshare"] * kfac[r["period"]], 3)
+    for r in rows:
+        r["boardings"] = round(r["board_day"] * r["_pshare"], 3)
 
 print("  시간대별 합 (연령가중 배율 적용)")
 for pid, h0, h1 in PERIODS:

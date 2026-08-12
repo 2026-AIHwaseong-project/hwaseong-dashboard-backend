@@ -36,6 +36,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import od_curve                                    # noqa: E402  (경로 삽입 후)
+
 ROOT = Path(__file__).resolve().parent.parent
 D_DIR = ROOT / "dataset_hwaseong"
 STATIC_DIR = ROOT / "server" / "static"
@@ -181,21 +184,26 @@ for h in range(24):
 # 모델의 승차량도 같은 실측으로 교정하므로(03_join [4-1]) 같은 B 를 두 곳이
 # 서로 다른 자로 나누지 않는다. 잠재수요는 이 배율을 쓰지 않는다.
 HOURLY_SRC = "연령가중 유동인구 시간배율"
-_od_path = D_DIR / "od_quarter.csv"
-if _od_path.exists():
-    _od = pd.read_csv(_od_path)
-    _od["hour"] = pd.to_numeric(_od["hour"], errors="coerce")
-    _agg = _od.groupby("hour")["trips"].sum()
-    _tot = sum(float(_agg.get(h, 0.0)) for h in HOURS_LIST)
-    if _tot > 0:
-        hourly_ratio = {h: (float(_agg.get(h, 0.0)) / _tot if h in HOURS_LIST else 0.0)
-                        for h in range(24)}
-        HOURLY_SRC = "교통카드 OD 15분단위 실측 시간분포"
-        print(f"  시간배율: {HOURLY_SRC} 사용 (유동인구 대체)")
-    else:
-        print("  시간배율: OD 합계가 0 — 유동인구 기준 유지")
+FLOW_CURVE = [hourly_ratio[h] for h in HOURS_LIST]
+OD_CITY_CURVE, OD_EMD_CURVE = od_curve.hourly_by_emd(D_DIR, HOURS_LIST)
+ARS2EMD = od_curve.load_stop_emd(D_DIR)
+if OD_CITY_CURVE:
+    HOURLY_SRC = "교통카드 OD 15분단위 실측 시간분포(법정동별)"
+    print(f"  시간배율: {HOURLY_SRC} — 법정동 {len(OD_EMD_CURVE)}개 곡선, "
+          f"나머지는 시 전체 곡선")
 else:
     print("  시간배율: od_quarter.csv 없음 — 유동인구 기준 유지")
+
+
+def stop_curve(ars_val):
+    """정류장이 속한 법정동의 시간곡선. 없으면 시 전체, OD 자체가 없으면 유동인구."""
+    if not OD_CITY_CURVE:
+        return FLOW_CURVE
+    a = str(ars_val or "").strip()
+    if a.endswith(".0"):
+        a = a[:-2]
+    a = a.lstrip("0")
+    return OD_EMD_CURVE.get(ARS2EMD.get(a, ""), OD_CITY_CURVE)
 
 # ── 3. 정류장 ARS → 일평균 승하차 집계 (boarding_hwaseong) ─────────────────
 print("승하차 집계 중...")
@@ -497,8 +505,9 @@ for _, row in stops.iterrows():
     # 카드가 통째로 백지가 된다 — 기록이 없어서가 아니라 반올림으로 사라진 것이다.
     # 실측: 2,866개 중 1,263개가 백지였고 그중 1,015개는 실제 승차 기록이 있었다.
     # 일평균 자체가 소수인 값이므로 시간 몫도 소수로 두는 게 맞다.
-    boardings_hr  = [round(board_total  * hourly_ratio[h], 2) for h in HOURS_LIST]
-    alightings_hr = [round(alight_total * hourly_ratio[h], 2) for h in HOURS_LIST]
+    _cv = stop_curve(row.get("ars"))
+    boardings_hr  = [round(board_total  * c, 2) for c in _cv]
+    alightings_hr = [round(alight_total * c, 2) for c in _cv]
 
     # 피크 비율
     peak_board = sum(boardings_hr[i] for i in peak_indices)
