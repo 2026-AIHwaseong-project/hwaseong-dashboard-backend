@@ -1,9 +1,11 @@
 # 화성시 버스 대시보드 API 명세서
 
 > **Base URL** `http://localhost:8000`  
-> **버전** v1 · **업데이트** 2026-08-09  
-> **서버** FastAPI · `uvicorn server.main:app --host 0.0.0.0 --port 8000`  
-> **Docker** `docker-compose up --build`
+> **버전** v1 · **업데이트** 2026-08-13  
+> **기동** `pip install -r requirements.txt` → `python main.py` ([README §5](../README.md#5-빠른-실행))  
+> **Docker** `docker compose up --build`
+>
+> 이 문서가 엔드포인트 계약의 정본입니다. 응답 예시는 실서버(`/openapi.json`) 기준입니다.
 
 ---
 
@@ -32,8 +34,20 @@ Content-Type: application/json
 Accept: application/json
 ```
 
-### CORS
+### CORS · 미들웨어
 모든 오리진 허용 (`allow_origins=["*"]`). 별도 인증 없음.
+**메서드는 GET·POST 만 허용**합니다 (`allow_methods=["GET","POST"]`).
+
+응답 1KB 이상은 gzip 으로 나갑니다 (`GZipMiddleware(minimum_size=1024)`).
+
+REST 외에 정적 마운트가 둘 있습니다.
+
+| 경로 | 내용 |
+|---|---|
+| `/data` | `server/static/` 계약 JSON 직접 열람 (예: `/data/grid_am.json`) |
+| `/app` | 형제 폴더에 프론트 저장소가 있으면 대시보드 화면을 같은 원점에서 서빙 |
+
+루트 `/` 는 404 입니다.
 
 ### 시간대 코드 (`period`)
 | 값 | 이름 | 시간 |
@@ -51,9 +65,12 @@ Accept: application/json
 ```
 | 코드 | 상황 |
 |---|---|
-| 400 | 잘못된 파라미터 (period, strategy, provider 등) |
+| 400 | 잘못된 파라미터 (period, strategy, provider, count·maxPlacements 범위 등) |
 | 404 | 리소스 없음 (stop profile) |
-| 500 | 서버 오류 / AI API 오류 |
+| 500 | 서버 오류 |
+
+**AI 오류는 500 이 아닙니다.** `POST /reports/draft` 는 키가 하나도 없거나 LLM 호출·파싱이
+실패해도 **200 + 규칙 기반 폴백 보고서**를 돌려줍니다(`isAiGenerated: false`). §9 참고.
 
 ---
 
@@ -66,7 +83,7 @@ Accept: application/json
 ```json
 {
   "region": "화성시",
-  "updatedAt": "2026-08-09",
+  "updatedAt": "2026-08-13",
   "isMockData": false,
   "periods": [
     { "id": "am",    "name": "출근", "label": "07–09", "hours": [7, 9]   },
@@ -76,7 +93,9 @@ Accept: application/json
   ],
   "grid": {
     "sizeMeters": 1000,
+    "displaySizeMeters": 1000,
     "cellCount": 786,
+    "analysisCellCount": 786,
     "crs": "EPSG:4326",
     "bbox": [126.53771, 37.01994, 127.15638, 37.29048]
   },
@@ -107,11 +126,36 @@ Accept: application/json
       "unitKrw": 42000000,
       "coverageRange": [0.15, 0.5]
     },
-    { "type": "drt",  "label": "똑버스 배치", "icon": "◆", "radiusKm": 3.0, "unitKrw": 180000000 },
-    { "type": "freq", "label": "배차 증편",   "icon": "▲", "radiusKm": 2.4, "unitKrw": 95000000  }
-  ]
+    { "type": "drt",  "label": "똑버스 배치", "icon": "◆", "radiusKm": 3.0, "unitKrw": 180000000, "annualKrw": 180000000, "basis": "operating", "lifeYears": 1, "coverageRange": [0, 0.15] },
+    { "type": "freq", "label": "배차 증편",   "icon": "▲", "radiusKm": 2.4, "unitKrw": 95000000,  "annualKrw": 95000000,  "basis": "operating", "lifeYears": 1, "coverageRange": [0.5, 1.0] }
+  ],
+  "dataQuality": {
+    "boardingDaily":  { "level": "observed",  "label": "일별 승하차",       "source": "경기데이터드림 정류소별 승하차 인원 집계 (2025-12~2026-03)" },
+    "boardingHourly": { "level": "estimated", "label": "시간대별 승하차",
+                        "method": "일자별 승하차를 교통카드 OD 15분단위 실측 시간분포(법정동별)로 안분",
+                        "note":   "원자료에 시간대 정보가 없습니다. 시간분포는 교통카드 OD(15분단위) 실측을 씁니다." },
+    "flowHourly":     { "level": "observed",  "label": "시간대별 유동인구", "source": "경기도 분석갤러리 유동인구(화성시) · 2023-12~2024-01",
+                        "note":   "승하차와 약 2년 시차가 있어 시간배율로만 사용합니다." },
+    "headway":        { "level": "observed",  "label": "배차간격",         "source": "경기도 버스노선 조회 API (peekAlloc/nPeekAlloc/nightAlloc)" },
+    "boundary":       { "level": "observed",  "label": "행정경계",         "source": "SGIS 통계지리정보서비스 읍면동 경계 (bnd_dong_00_2025_2Q)" }
+  },
+  "assumptions": {
+    "busTripRate":    { "value": 0.25, "confirmed": false, "note": "1인 1일 버스통행 = 전수단 원단위 2.5 × 버스분담률 0.1" },
+    "minFreqPerHour": { "value": 2.0,  "confirmed": false, "note": "적정·공급과잉 판정의 절대 하한. 야간 상대평가 오라벨 방지" }
+  },
+  "formula": {
+    "demand": "0.5·norm_board + 0.5·norm_potential",
+    "supply": "0.78·norm_freq + 0.22·coverage",
+    "mi":     "(zD − zS) · (D/dRef)^0.65",
+    "dampExp": 0.65, "wFreq": 0.78, "wCov": 0.22, "eldCoef": 1.6,
+    "coverageThresholdM": 600, "needMiThreshold": 0.75
+  }
 }
 ```
+
+> `cost.*` 에는 가정값 플래그가 없습니다. 단가가 가정값이라는 표시는 프론트
+> `assets/js/config.js` 의 `COST[].confirmed` 가 담당합니다. `assumptions` 에 실리는 것은
+> `busTripRate` 와 `minFreqPerHour` 둘뿐입니다.
 
 ---
 
@@ -131,13 +175,13 @@ Accept: application/json
     "miThresholds": [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2]
   },
   "kpi": {
-    "needCells": 38,
-    "drtCells": 63,
-    "overCells": 28,
+    "needCells": 30,
+    "drtCells": 72,
+    "overCells": 21,
     "totalCells": 786,
-    "needShare": 4.8,
-    "potentialTripsPerDay": 59502,
-    "elderlyTripsPerDay": 5517
+    "needShare": 3.8,
+    "potentialTripsPerDay": 39110,
+    "elderlyTripsPerDay": 3290
   },
   "cells": [ /* 786개, 아래 셀 필드 참고 */ ]
 }
@@ -160,7 +204,7 @@ Accept: application/json
 | `zSupply` | number | 공급 z-점수 |
 | `mi` | number | 미스매칭지수 (−2.6 ~ +2.6) |
 | `flow` | number | 정규화 잠재통행량 nf (0–1) |
-| `flowTripsPerDay` | integer | 추정 일 통행량 (`round(nf × 3200)`) |
+| `flowTripsPerDay` | integer | 추정 일 버스통행량 (`round(격자 인구 × 0.25)` — `meta.assumptions.busTripRate`) |
 | `elderlyRatio` | number | 고령비 (0–1) |
 | `coverage` | number | 정류장 접근 커버리지 (0.05–1.0) |
 | `quadrant` | string | `need` / `drt` / `over` / `ok` / `mid` |
@@ -205,19 +249,19 @@ Accept: application/json
   "items": [
     {
       "rank": 1,
-      "cellId": "다사3921",
-      "name": "새솔동",
-      "mi": 1.02,
-      "priorityScore": 1.1398,
-      "demand": 72,
-      "supply": 44,
-      "flowTripsPerDay": 2558,
-      "elderlyRatio": 0.127,
-      "coverage": 0.361,
-      "action": "ADD_FREQ",
-      "actionLabel": "증차",
-      "nearestStopId": "41590-55226",
-      "reason": "수요지수 72 대비 공급지수 44, 정류장 도보권 내이나 배차 부족"
+      "cellId": "다사6707",
+      "name": "동탄7동 동부",
+      "mi": 1.8088,
+      "priorityScore": 2.5823,
+      "demand": 71,
+      "supply": 25,
+      "flowTripsPerDay": 1505,
+      "elderlyRatio": 0.0732,
+      "coverage": 0.05,
+      "action": "DRT",
+      "actionLabel": "똑버스",
+      "nearestStopId": "41590-55750",
+      "reason": "수요지수 71 대비 공급지수 25, 가장 가까운 정류장이 510m 밖 (커버리지 0.05) — 노선 미연결, 수요응답형 필요"
     }
   ]
 }
@@ -243,19 +287,24 @@ Accept: application/json
       "lon": 126.715767,
       "lat": 37.205283,
       "kind": "rural",
-      "routes": ["GGB233000067"]
+      "routes": ["GGB233000067"],
+      "boardingsPerDay": 0.0
     }
   ]
 }
 ```
 
+정류장 2,866개. `boardingsPerDay` 는 평일 일평균 초승(환승 제외)이고 **소수**입니다.
+값이 없어서 0 인 것과 실측 0 이 구분되지 않으므로, 점 크기 등에 쓸 때는 결측 처리를
+따로 두세요.
+
 ### 정류장 `kind` 분류
 
-| 값 | 기준 |
-|---|---|
-| `hub` | 경유 노선 수 ≥ 5 |
-| `rural` | 소재 읍면동이 `면` |
-| `res` | 그 외 |
+| 값 | 기준 | 실제 분포 |
+|---|---|---|
+| `hub` | 경유 노선 수 ≥ 5 | 678 |
+| `rural` | 소재 읍면동이 `면` | 944 |
+| `res` | 그 외 | 1,244 |
 
 > **정류장 ID 형식** `"41590-{ARS번호}"` — 화성시 시군구코드(41590) + ARS 번호
 
@@ -287,6 +336,10 @@ Accept: application/json
 | `local` | 마을버스 |
 | `drt` | 똑버스 / 수요응답형 |
 
+> **현재 응답 200개 노선이 전부 `trunk` 입니다.** 마을버스 155개 노선은 경유정류소가
+> 비공개라 파이프라인에서 제외됐습니다(`analysis/09_augment_routes.py`). 판정 코드는
+> 3종을 지원하지만(`analysis/05_load.py`) `local`·`drt` 는 실제로 나오지 않습니다.
+
 - `stopIds`: 화성시 내 정류장만 포함 (순서 보장)
 - `path`: `[lon, lat]` 배열 — `stopIds`와 동일 순서
 
@@ -303,25 +356,28 @@ Accept: application/json
 
 ```json
 {
-  "stopId": "41590-37539",
-  "stopName": "양지말입구",
-  "kind": "rural",
-  "routes": ["GGB233000067"],
+  "stopId": "41590-55524",
+  "stopName": "동탄호수공원.부영4차",
+  "kind": "hub",
+  "routes": ["GGB200000152", "GGB223000056", "..."],
   "isEstimated": true,
-  "estimationMethod": "일자별 승하차를 연령가중 유동인구 시간배율로 안분",
+  "estimationMethod": "일자별 승하차를 교통카드 OD 15분단위 실측 시간분포(법정동별)로 안분",
   "hours": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
-  "boardings":  [0, 2, 18, 31, 12, 8, 6, 9, 7, 6, 8, 11, 29, 22, 10, 7, 5, 4, 2],
-  "alightings": [0, 1, 12, 21, 9, 6, 5, 7, 5, 5, 6,  9, 20, 17,  8, 5, 4, 3, 2],
+  "boardings":  [18.25, 54.02, 132.4, 181.09, 85.8, 64.54, "..."],
+  "alightings": [6.56, 19.41, 47.57, 65.06, 30.83, 23.19, "..."],
   "summary": {
-    "boardingsPerDay": 226,
-    "alightingsPerDay": 88,
-    "peakSharePct": 41.2
+    "boardingsPerDay": 1788.1,
+    "alightingsPerDay": 642.4,
+    "peakSharePct": 31.9
   }
 }
 ```
 
 - `hours`: 5시–23시 (19개 구간)
+- **`boardings`·`alightings`·`summary.*` 는 소수입니다.** 일 총량을 시간분포로 안분한
+  결과라 정수가 아닙니다 — 파싱·표시에서 정수로 가정하지 마세요.
 - `peakSharePct`: (07·08·17·18시 합산 / 전체) × 100
+- 쿼리 파라미터가 없습니다. `?period=` 를 붙여도 무시되고 응답은 동일합니다.
 - 존재하지 않는 `stopId` → `404 Not Found`
 
 ---
@@ -355,13 +411,16 @@ Accept: application/json
 
 | 필드 | 타입 | 설명 |
 |---|---|---|
-| `type` | string | `stop` / `drt` / `freq` |
-| `cellId` | string | 격자 ID |
-| `count` | integer | 수량 (기본 1) |
+| `type` | string | `stop` / `drt` / `freq` — 그 밖의 값은 **400** |
+| `cellId` | string | 격자 ID — 존재하지 않으면 **400** |
+| `count` | integer | 수량 (기본 1). **1~20** 밖이면 400 (`MAX_COUNT=20`) |
 
 #### 수단별 물리 파라미터
 
-| 수단 | 반경 | 주입 공급량 | 비용 (연환산) |
+비용은 **총사업비**입니다(연환산 아님). 연환산은 `meta.cost.*.annualKrw` 를 보세요 —
+정류장만 내용연수 10년으로 나뉘어 420만 원이고 나머지 둘은 총액과 같습니다.
+
+| 수단 | 반경 | 주입 공급량 | 총사업비 |
 |---|---|---|---|
 | `stop` (신설) | 800m 도보, 2km 커버리지 | 출퇴근 4.8회/창, 낮 8회, 심야 0 | 42,000,000원 |
 | `drt` (똑버스) | 3,000m | φ = 2.4회/창 (낮 9.6) | 180,000,000원 |
@@ -371,21 +430,26 @@ Accept: application/json
 
 ```json
 {
-  "id": "SIM-1234567",
+  "id": "SIM-7590457",
   "name": "시나리오 1",
-  "createdAt": "2026-08-09 14:30",
+  "createdAt": "2026-08-13 07:53",
   "placements": [
     {
       "type": "stop", "typeLabel": "정류장 신설",
-      "cellId": "다사3921", "cellName": "새솔동",
+      "cellId": "다사6707", "cellName": "동탄7동 동부",
       "count": 1, "radiusKm": 2.0, "unitKrw": 42000000
+    },
+    {
+      "type": "freq", "typeLabel": "배차 증편",
+      "cellId": "다사6809", "cellName": "동탄9동 중심",
+      "count": 1, "radiusKm": 2.4, "unitKrw": 95000000
     }
   ],
   "cost": {
     "totalKrw": 137000000,
     "breakdown": [
-      { "type": "stop", "label": "정류장 신설", "cellId": "다사3921", "unitKrw": 42000000, "count": 1, "amountKrw": 42000000 },
-      { "type": "freq", "label": "배차 증편",   "cellId": "다사6311", "unitKrw": 95000000, "count": 1, "amountKrw": 95000000 }
+      { "type": "stop", "label": "정류장 신설", "cellId": "다사6707", "unitKrw": 42000000, "count": 1, "amountKrw": 42000000 },
+      { "type": "freq", "label": "배차 증편",   "cellId": "다사6809", "unitKrw": 95000000, "count": 1, "amountKrw": 95000000 }
     ]
   },
   "budgetKrw": 3000000000,
@@ -393,24 +457,24 @@ Accept: application/json
     {
       "period": "am", "periodName": "출근",
       "kpi": {
-        "needCells": 31, "drtCells": 63, "overCells": 28, "totalCells": 786,
-        "needShare": 3.9, "potentialTripsPerDay": 51120, "elderlyTripsPerDay": 4703
+        "needCells": 28, "drtCells": 72, "overCells": 21, "totalCells": 786,
+        "needShare": 3.6, "potentialTripsPerDay": 38833, "elderlyTripsPerDay": 3268
       },
       "baseline": {
-        "needCells": 38, "drtCells": 63, "overCells": 28, "totalCells": 786,
-        "needShare": 4.8, "potentialTripsPerDay": 59502, "elderlyTripsPerDay": 5517
+        "needCells": 30, "drtCells": 72, "overCells": 21, "totalCells": 786,
+        "needShare": 3.8, "potentialTripsPerDay": 39110, "elderlyTripsPerDay": 3290
       },
       "delta": {
-        "needCells": -7, "drtCells": 0, "overCells": 0,
-        "needShare": -0.9
+        "needCells": -2, "drtCells": 0, "overCells": 0,
+        "needShare": -0.2, "potentialTripsPerDay": -277, "elderlyTripsPerDay": -22
       }
     }
     /* + day, pm, night */
   ],
   "effectiveness": {
-    "resolvedNeedCells": 28,
-    "resolvedTripsPerDay": 6120,
-    "krwPerTripPerDay": 22386
+    "resolvedNeedCells": 5,
+    "resolvedTripsPerDay": 735,
+    "krwPerTripPerDay": 186272
   },
   "cellsByPeriod": {
     "am":    [ /* /grid 의 cells 와 동일 형식, adjusted=true 포함 */ ],
@@ -421,8 +485,11 @@ Accept: application/json
 }
 ```
 
-- `resolvedTripsPerDay`: Poisson 회귀 기반 ΔB̂ (예측 승차 증가량)
-- `krwPerTripPerDay`: `totalKrw ÷ resolvedTripsPerDay`
+- `resolvedTripsPerDay`: Poisson 회귀 기반 ΔB̂ (예측 승차 증가량) — **4개 시간대 합산**입니다.
+  `periods[].delta` 는 시간대별이고 이 값은 전 시간대 합이라 서로 직접 비교되지 않습니다.
+- `krwPerTripPerDay`: `totalKrw ÷ resolvedTripsPerDay`. **ΔB̂ ≤ 0 이면 숫자가 아니라 `null`**
+  입니다 — 그대로 포맷하면 화면이 깨지므로 널 처리를 두세요.
+- `resolvedNeedCells` 도 4개 시간대 합산입니다(같은 격자가 여러 시간대에서 풀리면 중복 계수).
 - `cellsByPeriod`: 786개 전부 반환, 변경된 격자는 `adjusted: true`
 
 ---
@@ -480,47 +547,89 @@ Accept: application/json
 
 #### 그리디 알고리즘 요약
 
-1. 후보: am 기준 `need` + `drt` 격자
-2. 매 회차: 현재 상태에서 (수단, 격자) 조합의 ΔBhat / 비용 계산
-3. 최고 효율 선택 → 상태 갱신 → 반복
-4. 종료 조건: 예산 소진 / maxPlacements 달성 / 추가 이득 없음
+1. 후보: **요청 `period` 기준** `need` + `drt` 격자.
+   예전에는 am 으로 못박혀 있어 시간대를 바꿔도 결과가 같았습니다 — 지금은 바뀝니다.
+2. 수단은 조합으로 경쟁하지 않고 **커버리지로 배타 결정**됩니다 —
+   `cov < 0.15` → `drt`, `0.15 ≤ cov < 0.5` → `stop`, `cov ≥ 0.5` → `freq`.
+   따라서 한 격자의 후보 수단은 언제나 하나입니다.
+3. 매 회차: 후보별 ΔB̂ ÷ **총사업비**로 효율을 재고 최고값을 고릅니다.
+   같은 수단끼리는 **800m 이내에 겹쳐 놓지 않습니다**(도보권 중복 방지).
+4. 상태 갱신 → 반복. 종료 조건은 `summary.stoppedBecause` 로 나갑니다 —
+   `max_reached` / `budget_exhausted` / `budget_too_small` / `no_further_gain` / `no_candidate`.
+
+> 비용 비교는 **총사업비 기준**입니다(`summary.costCompareBasis: "total"`).
+> 예산 한도를 총액으로 자르므로 순위도 같은 자로 매깁니다 — 연환산으로 매기면
+> 정류장 쪽으로 쏠립니다([BACKEND.md](BACKEND.md) §6.2).
 
 ### 응답
 
 ```json
 {
+  "method": "budget-constrained greedy marginal benefit",
+  "methodLabel": "예산 제약 하 한계효과 최대화",
+  "methodNote": "출근 시간대 기준으로, …사업비 1원당 가장 많이 줄이는 지점을 순차 선택합니다. …",
+  "region": null,
   "strategy": "efficiency",
   "strategyLabel": "효율 최우선",
+  "strategyNote": "사업비 1원당 해소 통행량이 가장 큰 순서로 고릅니다.",
   "note": "사업비 1원당 해소 통행량이 가장 큰 순서로 고릅니다.",
+  "strategies": [
+    { "id": "efficiency", "label": "효율 최우선", "note": "사업비 1원당 해소 통행량이 가장 큰 순서로 고릅니다." }
+    /* + equity, balance, quick */
+  ],
   "budgetKrw": 3000000000,
-  "usedKrw": 515000000,
-  "remainingKrw": 2485000000,
+  "usedKrw": 897000000,
+  "remainingKrw": 2103000000,
   "placements": [
     {
       "rank": 1,
-      "type": "stop", "typeLabel": "정류장 신설",
-      "cellId": "다사5913", "cellName": "진안동",
-      "region": "진안동",
+      "type": "freq", "typeLabel": "배차 증편",
+      "cellId": "다사6509", "cellName": "동탄6동 동부",
+      "region": "동탄6동",
       "count": 1,
-      "radiusKm": 2.0,
-      "costKrw": 42000000,
-      "expectedResolvedTrips": 284
+      "radiusKm": 2.4,
+      "costKrw": 95000000,
+      "expectedResolvedTrips": 850
     }
   ],
+  "producedBy": {
+    "placements": "최적화 알고리즘 (예산 제약 하 그리디)",
+    "narrative": "Claude",
+    "deterministic": true,
+    "deterministicNote": "같은 조건이면 항상 같은 결과가 나옵니다. 다른 안이 필요하면 난수가 아니라 전략(목적)을 바꿉니다."
+  },
+  "summary": {
+    "count": 10,
+    "totalKrw": 897000000,
+    "budgetKrw": 3000000000,
+    "budgetUsedPct": 29.9,
+    "expectedResolvedCells": 11,
+    "expectedResolvedTrips": 17680,
+    "expectedResolvedElderlyTrips": 1068,
+    "krwPerTrip": 50735,
+    "stoppedBecause": "max_reached",
+    "costCompareBasis": "total",
+    "costCompareLabel": "총사업비 기준",
+    "costCompareNote": "예산 한도와 같은 기준(총사업비)으로 비교했습니다. 똑버스·증편은 이듬해에도 같은 예산이 필요합니다."
+  },
   "simulation": { /* POST /simulations 응답과 동일한 구조 */ },
   "alternatives": [
     {
       "strategy": "equity",
       "label": "교통약자 우선",
-      "count": 8,
-      "totalKrw": 476000000,
-      "mix": { "stop": 5, "drt": 2, "freq": 1 }
+      "count": 10,
+      "totalKrw": 844000000,
+      "mix": { "stop": 2, "drt": 0, "freq": 8 }
     }
   ]
 }
 ```
 
-- `alternatives`: `includeAlternatives: true` 일 때만 포함
+- **`stoppedBecause` 는 `summary` 안에 있습니다** (최상위가 아닙니다).
+- `alternatives`: `includeAlternatives: true` 일 때만 포함. **선택된 전략은 목록에서 빠지므로**
+  4개 전략 중 3개만 옵니다.
+- `producedBy`: 배치는 알고리즘이 정하고 문장만 AI 가 다듬는다는 것을 응답에 명시합니다.
+  `deterministic: true` — 같은 조건이면 항상 같은 결과입니다.
 - `simulation`: 선택된 `placements`를 `/simulations`에 넣은 것과 동일한 전체 결과
 
 ---
@@ -539,7 +648,7 @@ Accept: application/json
   "tone": "공문",
   "sections": ["summary", "status", "problem", "plan", "effect", "next"],
   "context": {
-    "kpi": { "needCells": 38, "totalCells": 786, "needShare": 4.8, "potentialTripsPerDay": 59502 },
+    "kpi": { "needCells": 30, "totalCells": 786, "needShare": 3.8, "potentialTripsPerDay": 39110 },
     "priorities": [ /* /priorities 응답의 items */ ],
     "simulation": { /* /simulations 응답 (선택) */ },
     "recommendation": { /* /recommendations 응답 (선택) */ }
@@ -557,7 +666,13 @@ Accept: application/json
 | `context` | object | `{}` | KPI·우선순위·시뮬 결과 전달 |
 
 #### 프로바이더 우선순위 (`auto`)
-`ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GOOGLE_API_KEY` 순서로 환경변수 확인
+
+1. `.env` 의 `AI_PROVIDER` — **단, 해당 키도 있어야** 채택합니다. 키 없는 지정은 무시하고 다음으로.
+2. 키를 보유한 첫 번째 프로바이더 (`ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GOOGLE_API_KEY`)
+3. 하나도 없으면 **규칙 기반 초안**으로 폴백합니다 (200 응답, 아래 참고).
+
+`.env` 의 `AI_MODEL` 은 `AI_PROVIDER` 로 지정한 프로바이더에만 적용됩니다 —
+다른 프로바이더 요청에 남의 모델 ID 가 넘어가는 것을 막기 위해서입니다.
 
 #### 기본 섹션 키
 `summary` (검토 개요) · `status` (현황) · `problem` (문제점) · `plan` (개선안) · `effect` (기대효과) · `next` (향후계획)
@@ -571,15 +686,16 @@ Accept: application/json
   "org": "화성시",
   "dept": "교통정책과",
   "period": "am",
-  "generatedAt": "2026-08-09 14:30",
+  "generatedAt": "2026-08-13 07:55",
   "provider": "Claude (Anthropic)",
   "model": "claude-sonnet-5",
+  "isAiGenerated": true,
   "sections": [
     {
       "key": "summary",
       "heading": "1. 검토 개요",
-      "body": "화성시 786개 격자 분석 결과 출근 시간대 기준 고수요·저공급 격자 38개(12.8%)가 확인됨.",
-      "bullets": ["need 격자 38개 중 대부분이 동탄·봉담 신개발지 집중", "..."]
+      "body": "화성시 786개 격자 분석 결과 출근 시간대 기준 고수요·저공급 격자 30개(3.8%)가 확인됨.",
+      "bullets": ["need 격자 30개 중 대부분이 동탄·봉담 신개발지 집중", "..."]
     }
   ],
   "tables": [
@@ -587,12 +703,26 @@ Accept: application/json
       "key": "priority",
       "title": "노선 조정 우선순위 (상위 5개 격자)",
       "columns": ["순위", "격자", "권역", "수요", "공급", "MI", "조치"],
-      "rows": [[1, "다사3921", "새솔동", 72, 44, 1.02, "증차"]]
+      "rows": [[1, "다사6707", "동탄7동 동부", 71, 25, 1.8088, "똑버스"]]
     }
   ],
   "disclaimer": "본 문서는 AI가 자동 생성한 초안입니다. 담당자 검토 후 활용하시기 바랍니다."
 }
 ```
+
+#### AI 키가 없거나 호출이 실패하면
+
+**500 이 아니라 200** 이 나갑니다. 서버가 규칙 기반 초안(`_fallback_report`)을 만들어
+같은 스키마로 돌려줍니다. LLM 응답의 JSON 파싱이 실패해도 마찬가지입니다.
+
+| 필드 | 폴백일 때 값 |
+|---|---|
+| `isAiGenerated` | `false` |
+| `provider` | `"규칙 기반 초안 (AI 미사용)"` |
+| `model` | `null` |
+| `sections` | 요청한 6개가 아니라 `summary`·`priority` **2개만** |
+
+프론트는 `isAiGenerated` 로 분기하세요. 오류 코드로는 구분되지 않습니다.
 
 ---
 
@@ -604,6 +734,7 @@ Accept: application/json
 
 ```json
 {
+  "configuredDefault": null,
   "providers": [
     {
       "id": "claude",
@@ -647,49 +778,71 @@ Accept: application/json
 ```
 
 - `available`: 해당 프로바이더의 API 키 환경변수가 설정된 경우 `true`
+- `configuredDefault`: `provider: "auto"` 가 실제로 어디로 가는지 (`_detect_provider` 결과).
+  키가 하나도 없으면 `null` 이고 이때 `/reports/draft` 는 규칙 기반 초안으로 폴백합니다.
+  드롭다운에서 "자동" 옆에 실제 대상을 표시할 때 쓰세요.
 
 ---
 
 ## 부록 A — 서버 실행
 
 ```bash
-# 직접 실행
+# 권장 — 원커멘드 진입점
 pip install -r requirements.txt
-uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
+python main.py                 # 0.0.0.0:8000
+python main.py --port 8080     # 포트 변경
+python main.py --reload        # 개발 모드
+python main.py --regen         # 정적 JSON 강제 재생성 후 기동
+python main.py --setup         # 정적 JSON 생성만 (서버 미기동)
 
 # Docker
-docker-compose up --build
+docker compose up --build
 
-# 정적 JSON 사전 생성 (서버 없이 /data/ 폴백 활용 시)
-python analysis/05_load.py   # server/static/ 생성
-python analysis/05_load.py   # server/static/ 생성 (서버가 /data 로도 서빙)
+# uvicorn 직접 실행 (server/static 자동 생성을 건너뜁니다)
+uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+`server/static/` 이 비어 있으면 `main.py` 가 `analysis/05_load.py` 를 자동으로 돌려 채웁니다.
+`uvicorn` 을 직접 쓰면 그 단계가 없으니 먼저 `python main.py --setup` 을 한 번 돌리세요.
 
 ## 부록 B — 환경변수 (`.env`)
 
-```bash
-# AI 보고서 — 하나 이상 필요
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GOOGLE_API_KEY=AIza...
+전체 목록은 [`.env.example`](../.env.example) 을 보세요. AI 관련만 옮기면 다음과 같습니다.
 
-# PostgreSQL (선택)
-DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong
+```bash
+# AI 보고서 — 없으면 규칙 기반 초안으로 폴백합니다 (필수 아님)
+ANTHROPIC_API_KEY=sk-ant-...      # Claude  (기본 claude-sonnet-5)
+OPENAI_API_KEY=sk-...             # GPT     (기본 gpt-5.6-sol)
+GOOGLE_API_KEY=AIza...            # Gemini  (기본 gemini-3.1-pro-preview)
+
+# provider=auto 가 고를 프로바이더를 못박고 싶을 때 (해당 키도 있어야 적용)
+AI_PROVIDER=claude
+# 기본 모델 재지정 — AI_PROVIDER 와 짝으로 설정할 때만 적용됩니다
+AI_MODEL=claude-sonnet-5
+
+# PostgreSQL (선택 — 현재 미사용)
+DATABASE_URL=postgresql://hw:hw_pass@db:5432/hwaseong
 ```
+
+공공데이터 수집용 키(`DATA_GO_KR_KEY_*`·`TAGO_*`·`GG_BUS_ROUTE_BASE` 등)는 원본 API 를
+다시 수집할 때만 필요합니다. 산출물이 커밋돼 있어 서버 기동에는 쓰이지 않습니다.
 
 ## 부록 C — 프론트엔드 연동
 
-```js
-// config.js
-const CONFIG = {
-  BASE_URL: "http://localhost:8000",
-  USE_MOCK: false,
-};
+프론트 설정은 `assets/js/config.js` 한 곳입니다. 실제 키는 `BASE_URL` · `API_PREFIX`
+(`/api/v1`) · `EXTRA_HEADERS` · `AUTH` · `TIMEOUT_MS` / `TIMEOUT_MS_REPORT` ·
+`EXPORT_MODE` · `PAGES` · `APP` · `GRID` · `KAKAO` · `COST` 입니다.
+서버 주소는 코드를 고치지 말고 주소 뒤에 `?server=` 를 붙여 바꾸세요(브라우저에 기억됩니다).
 
-// 폴백 패턴 (data/ 정적 파일)
-const grid = await fetch(`${BASE_URL}/api/v1/grid?period=am`)
-  .catch(() => fetch(`${BASE_URL}/data/grid_am.json`))
-  .then(r => r.json());
+**프론트에는 정적 폴백이 없습니다.** 모든 요청이 실서버로 갑니다 — 아래는 `/data` 를
+직접 열어볼 때의 예시일 뿐 프론트 동작이 아닙니다.
+
+```js
+// 계약 JSON 직접 열람 (디버깅용)
+const grid = await fetch(`${BASE_URL}/data/grid_am.json`).then(r => r.json());
+
+// 프론트가 실제로 쓰는 경로
+const grid2 = await fetch(`${BASE_URL}/api/v1/grid?period=am`).then(r => r.json());
 
 // 프로바이더 목록
 const { providers } = await fetch(`${BASE_URL}/api/v1/providers`).then(r => r.json());
