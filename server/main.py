@@ -506,7 +506,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
             allowed_types: list, region_ids=None, period: str = "am") -> tuple:
     """전략별 그리디. (placed, state, stopped) 반환.
 
-    stopped 는 왜 멈췄는지다. 프론트 계약(docs/API.md §3.7)에 있는 값이고,
+    stopped 는 왜 멈췄는지다. 계약(docs/API_SPEC.md §8)에 있는 값이고,
     없으면 화면이 "0건인데 예산 소진" 같은 모순 문구를 낸다.
         max_reached | budget_exhausted | budget_too_small
         no_further_gain | no_candidate
@@ -576,7 +576,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
             cost = COST_KRW[mode]
             if cost > budget_left:
                 continue
-            # 수단은 coverage 로 **배타 결정**된다 (docs/BACKEND.md §6.2).
+            # 수단은 coverage 로 **배타 결정**된다 (README §2 · docs/API_SPEC.md §8).
             #   cov ≥ 0.50        정류장은 도보권 안 → 버스가 안 온다 → freq 증편
             #   0.15 ≤ cov < 0.50 노선은 지나는데 정류장이 멀다 → stop 신설
             #   cov < 0.15        노선 자체가 없다 → 고정노선 비효율 → drt 똑버스
@@ -779,7 +779,7 @@ def run_recommendations(req: RecRequest):
                       "사업비 1원당 가장 많이 줄이는 지점을 순차 선택합니다. "
                       "수단은 정류장 접근성(coverage)으로 배타 결정되며, "
                       "배치 효과는 4개 시간대 전부에 반영해 보고합니다.",
-        # 요청에 없었으면 null = 화성시 전체 (docs/API.md §3.7)
+        # 요청에 없었으면 null = 화성시 전체 (docs/API_SPEC.md §8)
         "region": req.region or None,
         "strategy": strategy,
         "strategyLabel": STRAT_META[strategy]["label"],
@@ -806,7 +806,7 @@ def run_recommendations(req: RecRequest):
             "budgetUsedPct": round(total_krw / req.budgetKrw * 100, 1) if req.budgetKrw else 0.0,
             "expectedResolvedCells": resolved_cells,
             "expectedResolvedTrips": resolved_trips,
-            # 계약(docs/API.md §3.7)에 있는데 빠져 있던 필드. 프론트 어댑터가
+            # 계약(docs/API_SPEC.md §8)에 있는데 빠져 있던 필드. 프론트 어댑터가
             # delta 로 보충하고 있었지만, 서버가 주는 게 맞다.
             "expectedResolvedElderlyTrips": resolved_eld,
             "krwPerTrip": int(total_krw / resolved_trips) if resolved_trips > 0 else None,
@@ -930,7 +930,7 @@ def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
     """AI 키가 없을 때 쓰는 규칙 기반 초안.
 
     「AI 보고서 생성」 버튼이 깨지지 않게 하려는 것이다. 서버를 만든 첫 번째 이유가
-    이 버튼인데(기획서 §7), 발표장에서 키가 안 먹거나 호출이 실패하면 그대로 멎는다.
+    이 버튼인데(README §8), 발표장에서 키가 안 먹거나 호출이 실패하면 그대로 멎는다.
     정적 JSON 폴백(05_load.py)과 같은 원리로 마지막 방어선을 하나 둔다.
 
     ⚠️ 문장을 지어내지 않는다. 산출된 수치를 그대로 문장 틀에 끼울 뿐이고,

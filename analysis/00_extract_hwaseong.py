@@ -104,4 +104,4 @@ if f.exists():
 print("=" * 62)
 total = sum(p.stat().st_size for p in OUT.glob("*.csv"))
 print(f"완료 — dataset_hwaseong/ 총 {total/1e6:.1f} MB")
-print("※ SGIS 격자(전국 279MB)는 공간조인이 필요해 제외. dataset/README.md 참조")
+print("※ SGIS 격자(전국 279MB)는 공간조인이 필요해 제외. 원본 받을 곳은 README §7.")
