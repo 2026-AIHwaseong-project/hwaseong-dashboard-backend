@@ -216,7 +216,7 @@ def main():
             "freq": sub["freq"], "pop": sub["pop"], "workers": sub["workers"],
             "elderly_ratio": sub["elderly_ratio"], "region": sub["region"],
             "region_code": sub["region_code"], "region_kind": sub["region_kind"],
-            # 프론트 계약(docs/API.md §3.2 cells[]) 컬럼. 모델엔 안 쓰이고 응답 전용.
+            # 계약(docs/API_SPEC.md §2 cells[]) 컬럼. 모델엔 안 쓰이고 응답 전용.
             "d_score": np.round(D * 100, 2), "s_score": np.round(S * 100, 2),
             "flow_trips_per_day": np.round(sub["pop"].values * BUS_TRIP_RATE, 1),
             "nearest_stop_id": sub["nearest_stop_id"],
