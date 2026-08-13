@@ -15,7 +15,8 @@ D · S · MI · 4분면 · 우선순위 산출 — 전 격자 × 4시간대
 
 ⚠️ 격자 크기를 바꾸면(예: 500m 전환) 아래 [1]~[8] 의 측정 근거는 전부
    1km·786격자 기준 기록이 된다. 컷·감쇠·가드 값 자체는 그대로 돌아가지만
-   분포가 달라지므로 docs/GRID-500M.md 의 재튜닝 점검 목록을 따라 재검증할 것.
+   분포가 달라지므로 아래 [1]~[8] 을 하나씩 다시 잴 것. 각 상수가 어떤 실측에서
+   나왔는지는 README §2 "상수는 어디서 나왔나" 참고.
 
 ---
 수식 설계 결정 (전부 1km 786격자 실데이터로 측정·확인한 것)
@@ -146,7 +147,7 @@ def main():
         # 그러면 감쇠([3])와 drt 게이트가 무력화된다 — 조용히 지나가지 않게 잡는다.
         if K["fRef"] <= 0:
             print(f"  ⚠️ {t}: fRef=0 — 빈 셀 비중 증가로 drt 게이트 무력화. "
-                  "fref_q 분위를 인구>0 셀 기준으로 재산정 필요 (docs/GRID-500M.md)")
+                  "fref_q 분위를 인구>0 셀 기준으로 재산정 필요 (README §2)")
         if K["dRef"] < 0.05:
             print(f"  ⚠️ {t}: dRef={K['dRef']:.4f} — MI 감쇠 기준점이 0 근처. 재튜닝 필요")
         damp = np.clip(D / K["dRef"], 0, 1) ** DAMP_EXP
@@ -177,7 +178,7 @@ def main():
         e_clip = np.minimum(sub["elderly_ratio"].values, 1.0)
         pri = np.where(m_need, mi_raw * (0.35 + pw) * (1 + ELD_COEF * e_clip), 0.0)
 
-        # action — 수단은 coverage 로 **배타 결정**한다 (docs/BACKEND.md §6.2).
+        # action — 수단은 coverage 로 **배타 결정**한다 (README §2 · docs/API_SPEC.md §8).
         #   cov ≥ 0.50 (정류장 ≤300m)   도보권 안인데 버스가 안 온다 → 증차
         #   0.15 ≤ cov < 0.50 (300~510m) 노선은 지나는데 정류장이 멀다 → 신설
         #   cov < 0.15 (>510m)          노선 자체가 없다시피 하다 → 똑버스

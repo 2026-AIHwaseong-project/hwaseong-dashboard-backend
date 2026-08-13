@@ -576,7 +576,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
             cost = COST_KRW[mode]
             if cost > budget_left:
                 continue
-            # 수단은 coverage 로 **배타 결정**된다 (docs/BACKEND.md §6.2).
+            # 수단은 coverage 로 **배타 결정**된다 (README §2 · docs/API_SPEC.md §8).
             #   cov ≥ 0.50        정류장은 도보권 안 → 버스가 안 온다 → freq 증편
             #   0.15 ≤ cov < 0.50 노선은 지나는데 정류장이 멀다 → stop 신설
             #   cov < 0.15        노선 자체가 없다 → 고정노선 비효율 → drt 똑버스

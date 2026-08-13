@@ -16,7 +16,7 @@ services:
       start_period: 30s   # Poisson 회귀 로드 대기
 
   # PostgreSQL — 현재 미사용. 관리자 수정·실시간으로 확장할 때만 주석을 푼다.
-  #   자세한 이유: docs/BACKEND.md §0-1
+  #   자세한 이유: README.md §8 「PostgreSQL 은 왜 안 쓰는가」
   #   주석 해제 후:  pip install psycopg2-binary && python analysis/05_load.py --db
   # db:
   #   image: postgis/postgis:16-3.4-alpine
