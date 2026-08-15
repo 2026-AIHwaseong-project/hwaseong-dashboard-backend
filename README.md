@@ -808,11 +808,14 @@ pyproj 를 부르지 않으려고 lon/lat → 5179 변환을 2차 다항 회귀�
 ├── docs/
 │   └── API_SPEC.md             ⬅ 엔드포인트 10개 명세 (정본)
 ├── analysis/                   데이터 파이프라인 (§7 참고)
+│   ├── 06_load_db.py           계약 JSON → PostgreSQL 적재 (선택)
+│   ├── 06_verify_db.py         DB 모드 == JSON 모드 바이트 검증 (선택)
 │   └── schema.sql              초기 DuckDB 스키마 설계안 — 현재 미사용
 ├── server/
 │   ├── main.py                 FastAPI — 엔드포인트 10개 + /data·/app 마운트
+│   ├── db.py                   DATABASE_URL 이 있으면 DB 에서 읽음 (없으면 JSON)
 │   ├── static/                 ★ 계약 JSON 12개 (05_load.py 산출)
-│   └── schema_ops.sql          PostgreSQL 운영 스키마 — 현재 미사용
+│   └── schema_ops.sql          PostgreSQL 운영 스키마
 ├── scripts/test_ai.py          시연 전 AI 키 설정 점검
 ├── dataset_hwaseong/           화성시 데이터 + 산출물 (30파일 · 45MB)
 └── .env.example                환경변수 템플릿
@@ -836,7 +839,21 @@ pyproj 를 부르지 않으려고 lon/lat → 5179 변환을 2차 다항 회귀�
 | `norm_stats.json` | — | `04_model.py` | **정규화 기준통계(고정).** 시뮬레이션이 반드시 이걸 참조합니다 |
 | `hwaseong_dong.geojson` | 29 | 프론트 `tools/build-boundary.py` | 읍면동 실경계(4읍 9면 16동) · EPSG:4326 · 25m 단순화 |
 
-### PostgreSQL 은 왜 안 쓰는가
+### PostgreSQL — 기본은 안 쓰고, 켤 수는 있습니다
+
+> **이 절은 `feat/postgres-dev` 브랜치에서 갱신됐습니다.** 기본 동작은 그대로입니다 —
+> `docker compose up` 도, `python main.py` 도 계약 JSON 으로 돕니다. DB 는 켜야만 붙습니다.
+>
+> ```bash
+> docker compose --profile db up -d      # DB 는 profiles 뒤에 있어 기본 기동에는 안 뜸
+> pip install psycopg2-binary
+> DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong python analysis/06_load_db.py
+> DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong python analysis/06_verify_db.py
+> ```
+>
+> `DATABASE_URL` 이 없으면 JSON, 있으면 DB(`v_*` 뷰)에서 읽습니다. **연결에 실패하면
+> 경고를 찍고 JSON 으로 내려가므로 발표 중 DB 가 죽어도 화면은 삽니다** — 아래에서
+> 걱정한 "장애 지점이 하나 는다"에 대한 답입니다.
 
 파이프라인이 CSV·JSON 직결이고 서버는 기동 시 `server/static/` 을 메모리에 올립니다.
 
@@ -858,8 +875,8 @@ pyproj 를 부르지 않으려고 lon/lat → 5179 변환을 2차 다항 회귀�
 하나 더 뜨고 **장애 지점이 하나 늡니다.** 데이터는 786격자 × 4시간대라 통째로 메모리에
 올라갑니다 — 계약 JSON 12개, 합계 4.3MB 입니다.
 
-**`server/schema_ops.sql` 은 지운 게 아니라 남겨 뒀습니다.** 관리자 수정으로 확장할 때
-`batch_*`/`admin_*`/`v_*` 소유권 분리가 그대로 필요하기 때문입니다.
+**`server/schema_ops.sql` 이 그 확장의 실체입니다.** 관리자 수정을 붙이려면
+`batch_*`/`admin_*`/`v_*` 소유권 분리가 그대로 필요합니다.
 
 | 접두사 | 소유자 | 규칙 |
 |---|---|---|
@@ -875,13 +892,24 @@ pyproj 를 부르지 않으려고 lon/lat → 5179 변환을 2차 다항 회귀�
 고쳤는가"는 심사에서 반드시 나오는 질문이고, 그 답이 DB 에 있으면 강력합니다.
 `analysis/schema.sql`(DuckDB) 도 같은 성격의 초기 설계 산출물입니다.
 
-**붙일 때가 되면** `docker-compose.yml` 의 `db` 서비스 주석을 풀고
-`pip install psycopg2-binary` 하면 됩니다. `05_load.py` 는 psycopg2 가 있으면
-`DATABASE_URL` 로 적재를 시도하고, 없으면 `PostgreSQL 건너뜀` 을 찍고 조용히
-지나갑니다 — 별도 플래그는 없습니다. 그 다음 `server/main.py` 가 JSON 대신 `v_*` 를
-읽도록 바꾸면 됩니다.
+이 분리가 실제로 도는지는 확인했습니다 — override 를 넣고 **배치를 통째로 다시
+적재해도**(`batch_*` TRUNCATE 후 재삽입) 뷰에서 사람이 고친 값이 그대로 나옵니다.
+되돌리기는 `revoked_at` 을 채우므로 이력이 남습니다.
 
 인터페이스는 파일 한 층입니다 — `05_load.py` → `server/static/*.json` → FastAPI.
+DB 는 그 옆에 붙습니다: `server/static/*.json` → `06_load_db.py` → `v_*` → FastAPI.
+**계약 JSON 이 양쪽의 유일한 원본**이라 두 경로가 갈라질 수 없고, 실제로 안 갈라지는지는
+`06_verify_db.py` 가 8개 페이로드 4.1MB 를 바이트로 대조합니다.
+
+**왜 바이트까지 보는가** — `/api/v1/priorities` 는 `priorityScore` 로 정렬하는데 Python 의
+`sort` 가 안정 정렬이라 **동점 격자의 순위를 배열 순서가 가릅니다.** 값만 맞고 순서가
+달라지면 우선순위 1위가 조용히 바뀝니다. 그래서 `batch_grid.ord` 로 계약 JSON 의 배열
+순서를 보존하고, 통과용 문서는 `jsonb` 가 아니라 `json` 으로 둡니다(`jsonb` 는 객체
+키 순서를 보존하지 않습니다).
+
+**KPI 는 저장하지 않고 격자에서 셉니다.** 저장해 두면 관리자가 어떤 칸을 `need` 로
+고쳤을 때 지도에는 붉은 칸이 하나 늘고 상단 KPI 는 그대로인 화면이 나옵니다
+(실제로 그렇게 나왔습니다).
 
 ## 9. 데이터와 한계
 

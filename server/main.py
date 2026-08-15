@@ -16,6 +16,7 @@
 
 의존: server/static/ (analysis/05_load.py 로 생성)
       analysis/05_simulate.py (importlib 로 로드 — 파일명 숫자 시작)
+      server/db.py — DATABASE_URL 이 있으면 여기서 대신 읽습니다(없으면 JSON)
 """
 import importlib.util
 import json
@@ -33,6 +34,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from . import db
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -69,15 +72,27 @@ DATA: dict = {}
 
 
 # ─── 시작/종료 ──────────────────────────────────────────────────────────────────
+def _load_json() -> dict:
+    """계약 JSON 에서 읽는 기본 경로. DB 없이도 서버는 이대로 완전히 동작합니다."""
+    src = {f"grid_{p}": json.loads((STATIC / f"grid_{p}.json").read_text("utf-8"))
+           for p in PERIODS}
+    for k in ("meta", "stops", "routes", "profiles"):
+        src[k] = json.loads((STATIC / f"{k}.json").read_text("utf-8"))
+    return src
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    for p in PERIODS:
-        DATA[f"grid_{p}"] = json.loads((STATIC / f"grid_{p}.json").read_text("utf-8"))
-    DATA["meta"]     = json.loads((STATIC / "meta.json").read_text("utf-8"))
-    DATA["stops"]    = json.loads((STATIC / "stops.json").read_text("utf-8"))
-    DATA["routes"]   = json.loads((STATIC / "routes.json").read_text("utf-8"))
-    DATA["profiles"] = json.loads((STATIC / "profiles.json").read_text("utf-8"))
-    DATA["cells"]    = {p: {c["id"]: c for c in DATA[f"grid_{p}"]["cells"]} for p in PERIODS}
+    # DATABASE_URL 이 있으면 DB(v_* 뷰)에서, 없거나 실패하면 JSON 에서 읽습니다.
+    # 둘은 같은 것을 돌려줘야 합니다 — 확인은 python analysis/06_verify_db.py.
+    # 아래 어느 쪽으로 왔든 DATA 의 모양이 같으므로 엔드포인트·시뮬레이션 엔진은
+    # 자기가 무엇을 읽고 있는지 알 필요가 없습니다.
+    src = db.load_all(QUAD_LABEL, ACTION_LABEL)
+    if src is None:
+        src = _load_json()
+        print("[server] 계약 JSON 에서 로드", flush=True)
+    DATA.update(src)
+    DATA["cells"] = {p: {c["id"]: c for c in DATA[f"grid_{p}"]["cells"]} for p in PERIODS}
 
     spec = importlib.util.spec_from_file_location("hw_sim", ROOT / "analysis" / "05_simulate.py")
     m = importlib.util.module_from_spec(spec)
