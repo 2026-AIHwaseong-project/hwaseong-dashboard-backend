@@ -24,6 +24,14 @@ import os
 import sys
 from pathlib import Path
 
+# Windows 콘솔 기본값이 cp949 라 '⚠️' 같은 글자에서 print 가 UnicodeEncodeError 로
+# 죽습니다(한글은 cp949 에 있어 안 죽는 탓에 더 늦게 드러납니다). 진입점 스크립트라
+# 여기서 stdout 을 UTF-8 로 바꿔 둡니다 — 한글도 깨지지 않고 나옵니다.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass    # 리다이렉트된 스트림 등 reconfigure 를 못 쓰는 경우
+
 try:
     import psycopg2
     from psycopg2.extensions import AsIs, Float, register_adapter
@@ -55,6 +63,15 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "server" / "static"
 SCHEMA = ROOT / "server" / "schema_ops.sql"
 PERIODS = ["am", "day", "pm", "night"]
+
+# 서버(server/main.py)와 같은 곳에서 설정을 읽습니다. 이걸 안 하면 .env 에 적어 둔
+# DATABASE_URL 을 서버만 보고 이 스크립트는 아래 기본값으로 가서, 둘이 서로 다른
+# DB 를 보면서도 아무 경고가 안 뜹니다.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass    # python-dotenv 미설치면 셸 환경변수만 사용
 
 DB_URL = os.environ.get(
     "DATABASE_URL", "postgresql://hw:hw_pass@localhost:5432/hwaseong"

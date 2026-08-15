@@ -21,6 +21,13 @@ import sys
 PERIODS = ["am", "day", "pm", "night"]
 
 
+def warn(msg: str) -> None:
+    """경고는 stderr 로. Python 이 stderr 를 errors='backslashreplace' 로 열어 주므로
+    콘솔 인코딩(Windows 기본 cp949)이 못 쓰는 글자가 섞여도 터지지 않습니다.
+    stdout 은 errors='strict' 라 사정이 다릅니다 — load_all 끝 주석 참고."""
+    print(f"[db] {msg}", file=sys.stderr, flush=True)
+
+
 def _connect():
     """DATABASE_URL 이 없으면 None. 있으면 연결을 시도하고, 실패하면 크게 알린 뒤 None."""
     url = os.environ.get("DATABASE_URL")
@@ -29,16 +36,15 @@ def _connect():
     try:
         import psycopg2
     except ImportError:
-        print("[db] DATABASE_URL 이 있지만 psycopg2 가 없습니다 — JSON 으로 갑니다."
-              "  (pip install psycopg2-binary)", file=sys.stderr, flush=True)
+        warn("DATABASE_URL 이 있지만 psycopg2 가 없습니다. JSON 으로 갑니다."
+             "  (pip install psycopg2-binary)")
         return None
     try:
         conn = psycopg2.connect(url, connect_timeout=5)
     except Exception as exc:
         # 조용히 넘어가지 않습니다. DB 를 켰다고 믿으면서 실제로는 JSON 을 읽고 있는
         # 상태가 가장 나쁩니다 — 관리자 수정이 화면에 안 나오는데 원인을 못 찾습니다.
-        print(f"[db] ⚠️ DATABASE_URL 연결 실패 — JSON 으로 갑니다: {exc}",
-              file=sys.stderr, flush=True)
+        warn(f"DATABASE_URL 연결 실패. JSON 으로 갑니다: {exc}")
         return None
     with conn.cursor() as cur:
         # float 왕복이 정확해야 합니다. PG12+ 의 기본값이 이미 최단 왕복 표기라
@@ -119,8 +125,8 @@ def load_all(quad_label: dict, action_label: dict):
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM batch_grid")
             if not cur.fetchone()[0]:
-                print("[db] ⚠️ batch_grid 가 비었습니다 — JSON 으로 갑니다."
-                      "  (python analysis/06_load_db.py)", file=sys.stderr, flush=True)
+                warn("batch_grid 가 비었습니다. JSON 으로 갑니다."
+                     "  (python analysis/06_load_db.py)")
                 return None
 
             data = {}
@@ -171,10 +177,18 @@ def load_all(quad_label: dict, action_label: dict):
             )
             row = cur.fetchone()
         run = f"batch_run #{row[0]} ({row[1]:%Y-%m-%d %H:%M})" if row else "batch_run 없음"
-        print(f"[server] DB 에서 로드 — {run}, 관리자 수정 {n_ov}건", flush=True)
-        return data
     except Exception as exc:
-        print(f"[db] ⚠️ DB 읽기 실패 — JSON 으로 갑니다: {exc}", file=sys.stderr, flush=True)
+        warn(f"DB 읽기 실패. JSON 으로 갑니다: {exc}")
         return None
     finally:
         conn.close()
+
+    # ⚠️ 이 print 는 try 밖에 있어야 합니다. 안에 뒀다가 실제로 당했습니다 —
+    #    메시지에 em dash(U+2014)가 있었는데 Windows 콘솔 기본 인코딩이 cp949 라
+    #    stdout 이 UnicodeEncodeError 를 던졌고, 위 except 가 그걸 잡아 "DB 읽기
+    #    실패" 로 처리하며 조용히 JSON 으로 내려갔습니다. 데이터는 멀쩡히 다 읽은
+    #    뒤였습니다. **출력이 실패했다고 데이터 출처가 바뀌면 안 됩니다.**
+    #    (stderr 는 Python 이 errors='backslashreplace' 로 열어 줘서 안 터집니다.
+    #     그래서 경고만 내던 개발 중에는 이 함정이 안 보였습니다.)
+    print(f"[server] DB 에서 로드. {run}, 관리자 수정 {n_ov}건", flush=True)
+    return data

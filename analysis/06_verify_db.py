@@ -18,11 +18,26 @@ import os
 import sys
 from pathlib import Path
 
+# 근거는 06_load_db.py 의 같은 자리 주석. 여기서는 특히 중요합니다 — 차이를 보여 줄 때
+# 원문 조각을 그대로 찍는데, 거기에 콘솔이 못 쓰는 글자가 섞이면 검사 자체가 죽습니다.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 서버와 같은 곳에서 읽습니다(.env → 셸 환경변수 순으로 덮이지 않음).
+# 안 그러면 .env 에만 적어 둔 사람은 여기서 "DATABASE_URL 이 없습니다" 를 봅니다.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
+
 if not os.environ.get("DATABASE_URL"):
-    sys.exit("DATABASE_URL 이 없습니다. 예:\n"
+    sys.exit("DATABASE_URL 이 없습니다. .env 에 넣거나 앞에 붙여 주세요:\n"
              "  DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong "
              "python analysis/06_verify_db.py")
 
