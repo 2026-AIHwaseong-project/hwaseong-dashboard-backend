@@ -100,6 +100,48 @@ def safe_int(v, default=0):
         return default
 
 
+# ── 결측을 0 이 아니라 null 로 넘기는 유틸 ──────────────────────────────────
+# 위 safe_float/safe_int 는 결측을 0 으로 바꿉니다. 지표(수요·공급)에서는 그게 맞지만
+# 운행정보에서는 거짓말이 됩니다 — "배차 0분" 은 없는 값이지 0 분이 아닙니다.
+# 화면에 나가는 수치는 전부 실측이어야 하므로, 없는 값은 null 로 보내 프론트가
+# '자료 없음' 을 찍게 합니다.
+def opt_text(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    return None if s == "" or s.lower() in ("nan", "none") else s
+
+
+def opt_hhmm(v):
+    """'0430'·'430' → '04:30'. 원본은 3~4자리 숫자이고 시는 4~23 범위입니다.
+
+    ⚠️ 문자열 자르기로 풀면 안 됩니다. 결측이 하나라도 있는 열을 pandas 가 float64 로
+       읽어서 '2300.0' 으로 들어옵니다 — last_time 이 그렇고, 자리수를 세는 방식이면
+       200개 전부 None 이 됩니다(실제로 그렇게 나왔습니다). 숫자로 받습니다."""
+    s = opt_text(v)
+    if s is None:
+        return None
+    try:
+        n = int(float(s.replace(":", "")))
+    except (TypeError, ValueError):
+        return None
+    h, m = divmod(n, 100)
+    return None if h > 23 or m > 59 else f"{h:02d}:{m:02d}"
+
+
+def opt_minutes(v):
+    """배차간격(분). 0 이하는 결측으로 봅니다 — 0분 배차는 존재할 수 없습니다.
+       (원본에서 출퇴근 17건·평시 29건이 0 으로 채워져 있습니다)"""
+    s = opt_text(v)
+    if s is None:
+        return None
+    try:
+        n = int(float(s))
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
 def write_json(path, obj):
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(obj, fh, ensure_ascii=False, separators=(",", ":"))
@@ -321,6 +363,20 @@ for _, row in routes_df.iterrows():
         "type":    route_type_str(row.to_dict()),
         "stopIds": sids,
         "path":    path,
+        # ── 운행정보(실측). 노선 상세 화면이 씁니다 ────────────────────────
+        # 원본(routes.csv)에 있는데 여기서 버리고 있던 값들입니다. 시뮬레이션이
+        # '증차' 를 추천하면서 어느 노선을 얼마나 늘릴지 말하려면 배차간격이
+        # 화면에 있어야 합니다.
+        #
+        # night_alloc(심야배차)·dispatch_num(운행횟수)은 싣지 않습니다 —
+        # 각각 3%·0% 만 채워져 있어 화면에 빈 칸만 만듭니다.
+        "startStop":      opt_text(row.get("start_stop")),
+        "endStop":        opt_text(row.get("end_stop")),
+        "firstTime":      opt_hhmm(row.get("first_time")),
+        "lastTime":       opt_hhmm(row.get("last_time")),
+        "headwayPeak":    opt_minutes(row.get("peek_alloc")),   # 원본 철자 그대로(peek)
+        "headwayOffpeak": opt_minutes(row.get("npeek_alloc")),
+        "company":        opt_text(row.get("company")),
     })
 
 write_json(STATIC_DIR / "routes.json", {"routes": routes_out})
