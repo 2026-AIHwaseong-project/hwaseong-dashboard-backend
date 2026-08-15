@@ -286,6 +286,49 @@ stop_to_routes = (
 )
 
 # 노선 → 화성시 정류장 순서 목록 (seq 기준, 같은 stop 두 번 출현 시 첫번째만)
+def turn_index(coords):
+    """왕복 노선의 회차 지점(시작점에서 가장 먼 정류장) 인덱스. 편도면 None.
+
+    노선 하나가 상행·하행을 이어 담고 있습니다 — 200개 중 185개가 기점과 종점이
+    같은 지점입니다(직선거리 0.0km). 그래서 지도에 그리면 선이 제자리로 돌아와
+    겹치고, 어느 쪽이 가는 길인지 알 수 없습니다. 여기서 접는 자리를 찾아 두면
+    프론트가 두 구간을 갈라 그릴 수 있습니다.
+
+    ⚠️ 실측이 아니라 경로 기하에서 뽑은 **추정**입니다. route_station.csv 에 방향
+       (updown = F/B)이 있지만 쓸 수 없었습니다 — 정류장 수가 소스마다 다르고
+       (400번: routes.json 151 · route_stops 246 · route_station 223) seq 를 맞출
+       수 없으며, 우리 200개 중 162개만 들어 있습니다. 그래서 화면에서도
+       '상행/하행' 이라 부르지 않고 기점·종점 이름으로 구간을 표시합니다.
+
+    자신이 없으면 None 을 돌려줍니다(편도·순환·한쪽으로 치우친 경우). 틀리게
+    가르느니 지금처럼 한 줄로 그리는 편이 낫습니다 — 실제로 3개가 여기 걸립니다.
+    """
+    n = len(coords)
+    if n < 4:
+        return None
+
+    def km(a, b):
+        # 화성 위도에서의 근사(경도 1도 ≈ 88km, 위도 1도 ≈ 111km). 순위 비교용이라
+        # 정밀 측지 계산이 필요 없습니다.
+        return math.hypot((a[0] - b[0]) * 88.0, (a[1] - b[1]) * 111.0)
+
+    total = sum(km(coords[i], coords[i + 1]) for i in range(n - 1))
+    if total <= 0:
+        return None
+    # 기점과 종점이 멀면 편도 — 접을 자리가 없습니다.
+    if km(coords[0], coords[-1]) / total >= 0.12:
+        return None
+
+    bi = max(range(n), key=lambda i: km(coords[0], coords[i]))
+    if not (0.2 <= bi / (n - 1) <= 0.8):
+        return None
+    out = sum(km(coords[i], coords[i + 1]) for i in range(bi))
+    back = total - out
+    if back <= 0 or not (0.5 <= out / back <= 2.0):
+        return None
+    return bi
+
+
 def build_route_stops(route_id):
     sub = rs_hw[rs_hw["route_id"] == route_id].sort_values("seq")
     seen = set()
@@ -377,6 +420,9 @@ for _, row in routes_df.iterrows():
         "headwayPeak":    opt_minutes(row.get("peek_alloc")),   # 원본 철자 그대로(peek)
         "headwayOffpeak": opt_minutes(row.get("npeek_alloc")),
         "company":        opt_text(row.get("company")),
+        # 왕복 노선을 두 구간으로 가르는 지점(추정). null 이면 한 줄로 그립니다.
+        # stopIds 와 path 는 같은 루프에서 만들어져 인덱스가 서로 맞습니다.
+        "turnIdx":        turn_index(path),
     })
 
 write_json(STATIC_DIR / "routes.json", {"routes": routes_out})
