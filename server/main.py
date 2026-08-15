@@ -978,6 +978,12 @@ def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
     }
 
 
+#  보고서 한 벌(6개 섹션 + 표)이 한글로 5,000자를 넘습니다. 4096 으로 두었더니
+#  JSON 이 중간에 잘려 "Expecting ',' delimiter: line 96 column 43 (char 4907)" 로
+#  파싱이 실패했습니다(실측). 잘린 응답은 무엇을 고쳐도 복구가 안 되므로 상한을 올립니다.
+AI_MAX_TOKENS = 8192
+
+
 def _call_ai(provider: str, model: str, prompt: str) -> str:
     """프로바이더별 API 호출 → 텍스트 반환."""
     import os
@@ -993,7 +999,7 @@ def _call_ai(provider: str, model: str, prompt: str) -> str:
         client = anthropic.Anthropic(api_key=key)
         msg = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=AI_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
         # content[0] 이 항상 텍스트인 게 아니다. 최신 모델은 ThinkingBlock 을
@@ -1013,7 +1019,7 @@ def _call_ai(provider: str, model: str, prompt: str) -> str:
         client = openai.OpenAI(api_key=key)
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=AI_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.choices[0].message.content
@@ -1121,10 +1127,11 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 
     try:
         text = _call_ai(provider, model, prompt).strip()
-        m = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
-        if m:
-            text = m.group(1)
-        result = json.loads(text)
+        # 코드펜스 벗기기 + 산문 뒤에 붙은 JSON 건지기는 _extract_json 한 곳에 모았습니다
+        # (챗봇에서 실제로 그 두 경우를 다 만났습니다 — 그 함수 주석 참고).
+        result = _extract_json(text)
+        if not isinstance(result, dict):
+            raise json.JSONDecodeError("JSON 객체를 찾지 못했습니다", text[:200], 0)
         result["generatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         result["provider"]    = _PROVIDERS[provider]["label"]
         result["model"]       = model
@@ -1284,11 +1291,15 @@ _CHAT_RULES = """당신은 화성시 버스 수요·공급 미스매칭 대시�
 ■ 응답 형식 — JSON 만, 마크다운 코드블록 없이
 {"reply": "답변 문장", "action": {"type": "none"}}
 
-■ action 은 사용자가 화면을 옮겨 달라고 했을 때만 채웁니다. 셋 중 하나입니다.
+■ action — 사용자가 무언가를 보고 싶어 하면 **반드시** 채웁니다. 셋 중 하나입니다.
   {"type":"period","value":"am|day|pm|night"}       시간대 전환
   {"type":"layer","value":"mi|demand|supply|flow"}  지도 색 기준 전환
   {"type":"show","query":"향남읍"}                  읍면동·격자ID·버스번호·정류장으로 이동
-  요청이 없으면 {"type":"none"} 입니다. 답변만 하면서 화면을 멋대로 바꾸지 마세요."""
+
+  "보여줘" · "찾아줘" · "이동해줘" · "어디야?" · "~로 바꿔줘" 는 전부 요청입니다.
+  말로 "이동합니다" 라고만 하고 action 을 none 으로 두면 화면이 그대로라 거짓말이
+  됩니다 — 옮기겠다고 말했으면 action 을 반드시 채우세요.
+  반대로 단순한 설명 질문("MI가 뭐야?")에는 {"type":"none"} 입니다."""
 
 _CHAT_REPORT_RULES = """당신은 화성시 버스 대시보드의 보고서 편집기입니다.
 사용자의 지시대로 **현재 초안**을 고쳐 씁니다.
@@ -1321,7 +1332,7 @@ def _call_ai_chat(provider: str, model: str, system: str, messages: list) -> str
         if not key:
             raise HTTPException(500, "ANTHROPIC_API_KEY 환경변수가 없습니다.")
         msg = anthropic.Anthropic(api_key=key).messages.create(
-            model=model, max_tokens=4096, system=system, messages=messages,
+            model=model, max_tokens=AI_MAX_TOKENS, system=system, messages=messages,
         )
         # 최신 모델이 ThinkingBlock 을 먼저 보내므로 첫 블록만 보면 터집니다
         # (_call_ai 의 같은 자리 주석 참고). 텍스트 블록만 골라 잇습니다.
@@ -1336,7 +1347,7 @@ def _call_ai_chat(provider: str, model: str, system: str, messages: list) -> str
         if not key:
             raise HTTPException(500, "OPENAI_API_KEY 환경변수가 없습니다.")
         resp = openai.OpenAI(api_key=key).chat.completions.create(
-            model=model, max_tokens=4096,
+            model=model, max_tokens=AI_MAX_TOKENS,
             messages=[{"role": "system", "content": system}] + messages,
         )
         return resp.choices[0].message.content
