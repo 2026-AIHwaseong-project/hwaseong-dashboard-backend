@@ -7,6 +7,9 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      # 비어 있으면 server/db.py 가 곧장 계약 JSON 으로 갑니다 — 기본 동작은
+      # DB 를 붙이기 전과 완전히 같습니다(경고도 안 찍힙니다).
+      - DATABASE_URL=${DATABASE_URL:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/meta"]
@@ -15,20 +18,34 @@ services:
       retries: 3
       start_period: 30s   # Poisson 회귀 로드 대기
 
-  # PostgreSQL — 현재 미사용. 관리자 수정·실시간으로 확장할 때만 주석을 푼다.
-  #   자세한 이유: README.md §8 「PostgreSQL 은 왜 안 쓰는가」
-  #   주석 해제 후:  pip install psycopg2-binary && python analysis/05_load.py --db
-  # db:
-  #   image: postgis/postgis:16-3.4-alpine
-  #   environment:
-  #     POSTGRES_DB: hwaseong
-  #     POSTGRES_USER: hw
-  #     POSTGRES_PASSWORD: hw_pass
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - pgdata:/var/lib/postgresql/data
-  #     - ./server/schema_ops.sql:/docker-entrypoint-initdb.d/schema.sql
+  # PostgreSQL + PostGIS — 관리자 수정·실시간용. 기본 기동에는 안 뜹니다.
+  #
+  #   docker compose up -d                    → api 만. 계약 JSON 으로 동작(종전과 동일)
+  #   docker compose --profile db up -d       → db 도 함께
+  #
+  # profiles 를 쓰는 이유 — README §8 의 반대 근거가 "발표장에서 컨테이너가 하나 더
+  # 뜨고 장애 지점이 하나 는다" 였습니다. 기본 경로에서 안 뜨면 그 반대 근거가
+  # 그대로 유지되고, 필요한 사람만 플래그 하나로 켭니다.
+  db:
+    profiles: ["db"]
+    image: postgis/postgis:16-3.4-alpine
+    environment:
+      POSTGRES_DB: hwaseong
+      POSTGRES_USER: hw
+      POSTGRES_PASSWORD: hw_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 빈 데이터 디렉터리로 처음 뜰 때만 실행됩니다. 스키마를 고친 뒤에는
+      # python analysis/06_load_db.py 가 매번 다시 걸어 주므로(전부 IF NOT EXISTS /
+      # OR REPLACE) 볼륨을 지울 필요는 없습니다.
+      - ./server/schema_ops.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hw -d hwaseong"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-# volumes:
-#   pgdata:
+volumes:
+  pgdata:

@@ -901,129 +901,18 @@ for period in PERIODS:
     write_json(STATIC_DIR / f"priorities_{period}.json", {"period": period, "items": items})
     print(f"  priorities_{period}.json: {len(items)}건")
 
-# ── 11. PostgreSQL 적재 (graceful fallback) ──────────────────────────────────
-print("PostgreSQL 적재 시도 중...")
-try:
-    import psycopg2  # noqa: F401 — import 실패 시 아래 except로 이동
-
-    db_url = os.environ.get(
-        "DATABASE_URL",
-        "postgresql://postgres:postgres@localhost:5432/hwaseong",
-    )
-    conn = psycopg2.connect(db_url)
-    cur = conn.cursor()
-
-    # batch_grid
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS batch_grid (
-            grid_id       TEXT PRIMARY KEY,
-            lon           DOUBLE PRECISION,
-            lat           DOUBLE PRECISION,
-            x_5179        DOUBLE PRECISION,
-            y_5179        DOUBLE PRECISION,
-            region_code   TEXT,
-            region        TEXT,
-            region_kind   TEXT,
-            pop           INTEGER,
-            elderly       INTEGER,
-            elderly_ratio DOUBLE PRECISION,
-            workers       INTEGER
-        )
-    """)
-    cur.execute("DELETE FROM batch_grid")
-    for _, row in gh.iterrows():
-        cur.execute(
-            """INSERT INTO batch_grid VALUES
-               (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (
-                str(row["grid_id"]),
-                safe_float(row["lon"]),
-                safe_float(row["lat"]),
-                safe_float(row["x_5179"]),
-                safe_float(row["y_5179"]),
-                str(int(row["region_code"])) if pd.notna(row.get("region_code")) else None,
-                str(row["region"]),
-                str(row["region_kind"]),
-                safe_int(row.get("pop")),
-                safe_int(row.get("elderly")),
-                safe_float(row.get("elderly_ratio")),
-                safe_int(row.get("workers")),
-            ),
-        )
-
-    # batch_grid_metrics
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS batch_grid_metrics (
-            grid_id    TEXT,
-            period     TEXT,
-            d          DOUBLE PRECISION,
-            s          DOUBLE PRECISION,
-            zd         DOUBLE PRECISION,
-            zs         DOUBLE PRECISION,
-            mi         DOUBLE PRECISION,
-            quadrant   TEXT,
-            priority   DOUBLE PRECISION,
-            bin_mi     INTEGER,
-            bin_demand INTEGER,
-            bin_supply INTEGER,
-            bin_flow   INTEGER,
-            coverage   DOUBLE PRECISION,
-            freq       DOUBLE PRECISION,
-            nf         DOUBLE PRECISION,
-            action     TEXT,
-            PRIMARY KEY (grid_id, period)
-        )
-    """)
-    cur.execute("DELETE FROM batch_grid_metrics")
-    for _, row in gm.iterrows():
-        cur.execute(
-            """INSERT INTO batch_grid_metrics VALUES
-               (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (
-                str(row["grid_id"]),
-                str(row["period"]),
-                safe_float(row["D"]),
-                safe_float(row["S"]),
-                safe_float(row["zD"]),
-                safe_float(row["zS"]),
-                safe_float(row["mi"]),
-                str(row["quadrant"]),
-                safe_float(row["priority"]),
-                safe_int(row["bin_mi"]),
-                safe_int(row["bin_demand"]),
-                safe_int(row["bin_supply"]),
-                safe_int(row["bin_flow"]),
-                safe_float(row["coverage"]),
-                safe_float(row["freq"]),
-                safe_float(row["nf"]),
-                str(row["action"]),
-            ),
-        )
-
-    # batch_run 기록
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS batch_run (
-            id         SERIAL PRIMARY KEY,
-            run_at     TIMESTAMPTZ DEFAULT NOW(),
-            grid_count INTEGER,
-            stop_count INTEGER,
-            route_count INTEGER,
-            note       TEXT
-        )
-    """)
-    cur.execute(
-        "INSERT INTO batch_run (grid_count, stop_count, route_count, note) VALUES (%s,%s,%s,%s)",
-        (int(len(gh)), int(len(stops)), int(len(routes_df)), "05_load.py 자동 적재"),
-    )
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    print("  PostgreSQL 적재 완료")
-
-except Exception as exc:
-    print(f"  PostgreSQL 건너뜀 (DB 미연결): {exc}")
-
+# ── 11. PostgreSQL 적재 ──────────────────────────────────────────────────────
+# 여기 있던 psycopg2 블록은 analysis/06_load_db.py 로 옮겼습니다.
+#
+# 그 블록은 CREATE TABLE IF NOT EXISTS 로 batch_grid 를 제 나름의 컬럼(lon·lat·
+# x_5179·region_kind…)으로 만들었는데, server/schema_ops.sql 의 batch_grid 와
+# 컬럼이 달랐습니다. 스키마를 먼저 건 DB 에 대고 돌리면 INSERT 가 컬럼 수에서
+# 터지고, 그 예외를 "PostgreSQL 건너뜀 (DB 미연결)" 로 삼켰습니다 — 연결은
+# 멀쩡한데 미연결이라고 찍히는, 원인을 못 찾는 종류의 메시지였습니다.
+#
+# 이제 적재는 계약 JSON(= 이 스크립트의 산출물)을 읽어 한 곳에서 합니다:
+#     python analysis/06_load_db.py
+#     python analysis/06_verify_db.py     ← JSON 모드와 같은지 바이트로 확인
 # ── 12. 완료 메시지 ──────────────────────────────────────────────────────────
 print(
     f"\n저장 완료: meta.json, grid_*.json (4개), "
