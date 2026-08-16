@@ -3,7 +3,7 @@
 화성시 버스 대시보드 FastAPI 서버
     uvicorn server.main:app --reload   (백엔드 루트에서)
 
-엔드포인트 9개:
+엔드포인트 10개:
     GET  /api/v1/meta
     GET  /api/v1/grid?period=am
     GET  /api/v1/priorities?period=am&limit=10
@@ -13,8 +13,10 @@
     POST /api/v1/simulations
     POST /api/v1/recommendations
     POST /api/v1/reports/draft
+    POST /api/v1/chat
 
 의존: server/static/ (analysis/05_load.py 로 생성)
+      server/chat_kb.md (챗봇 지식 — 사람이 쓰는 파일)
       analysis/05_simulate.py (importlib 로 로드 — 파일명 숫자 시작)
 """
 import importlib.util
@@ -976,6 +978,12 @@ def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
     }
 
 
+#  보고서 한 벌(6개 섹션 + 표)이 한글로 5,000자를 넘습니다. 4096 으로 두었더니
+#  JSON 이 중간에 잘려 "Expecting ',' delimiter: line 96 column 43 (char 4907)" 로
+#  파싱이 실패했습니다(실측). 잘린 응답은 무엇을 고쳐도 복구가 안 되므로 상한을 올립니다.
+AI_MAX_TOKENS = 8192
+
+
 def _call_ai(provider: str, model: str, prompt: str) -> str:
     """프로바이더별 API 호출 → 텍스트 반환."""
     import os
@@ -991,7 +999,7 @@ def _call_ai(provider: str, model: str, prompt: str) -> str:
         client = anthropic.Anthropic(api_key=key)
         msg = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=AI_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
         # content[0] 이 항상 텍스트인 게 아니다. 최신 모델은 ThinkingBlock 을
@@ -1011,7 +1019,7 @@ def _call_ai(provider: str, model: str, prompt: str) -> str:
         client = openai.OpenAI(api_key=key)
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=AI_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.choices[0].message.content
@@ -1119,10 +1127,11 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 
     try:
         text = _call_ai(provider, model, prompt).strip()
-        m = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
-        if m:
-            text = m.group(1)
-        result = json.loads(text)
+        # 코드펜스 벗기기 + 산문 뒤에 붙은 JSON 건지기는 _extract_json 한 곳에 모았습니다
+        # (챗봇에서 실제로 그 두 경우를 다 만났습니다 — 그 함수 주석 참고).
+        result = _extract_json(text)
+        if not isinstance(result, dict):
+            raise json.JSONDecodeError("JSON 객체를 찾지 못했습니다", text[:200], 0)
         result["generatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         result["provider"]    = _PROVIDERS[provider]["label"]
         result["model"]       = model
@@ -1147,3 +1156,291 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
         fb["disclaimer"] = f"AI 호출에 실패해 규칙 기반 초안으로 대체했습니다 ({provider}: {detail}). " \
                            + fb["disclaimer"]
         return fb
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  10. POST /api/v1/chat — 도움 챗봇 · 보고서 채팅 수정
+#
+#  RAG 를 쓰지 않습니다. 챗봇이 알아야 할 개념 지식은 meta.json 안에 2,353자
+#  (formula·assumptions·effects·cost·dataQuality)뿐이고, chat_kb.md 를 더해도
+#  1만 자 안팎입니다 — 모델 컨텍스트에 통째로 들어갑니다. 코퍼스가 컨텍스트에
+#  들어가는데 임베딩·벡터저장소·청킹을 붙일 이유가 없습니다.
+#
+#  데이터 질문에도 RAG 는 틀린 도구입니다. "향남읍에서 3번째로 심한 격자"는 의미가
+#  비슷한 문장을 찾는 문제가 아니라 순위를 세는 문제입니다. 그래서 답에 필요한 것을
+#  서버가 미리 추려 프롬프트에 싣습니다(_chat_pack).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CHAT_KB_PATH = ROOT / "server" / "chat_kb.md"
+MAX_CHAT_CHARS = 2000      # 사용자 입력 한 번의 상한
+MAX_CHAT_TURNS = 10        # 서버로 넘어오는 이력 상한 (프롬프트 폭주 방지)
+
+
+def _extract_json(text: str):
+    """모델 응답에서 JSON 객체 하나를 건져 냅니다. 못 건지면 None.
+
+    ⚠️ json.loads(text) 만으로는 부족합니다. "JSON 만 응답하라"고 못박아도 모델이
+       **산문을 먼저 쓰고 그 뒤에 JSON 을 덧붙이는** 경우가 실제로 나옵니다(실측 —
+       답변 문장 + 빈 줄 + {"reply": …}). 그러면 파싱이 실패하고 사용자에게 프롬프트
+       내부 형식이 그대로 노출됩니다.
+       그래서 ① 코드펜스를 벗기고 ② 통째로 파싱해 보고 ③ 안 되면 중괄호 균형을 세어
+       첫 번째 완결된 객체를 잘라 씁니다."""
+    m = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+    if m:
+        text = m.group(1)
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _region_digest(period: str) -> list:
+    """읍면동별 한 줄 요약. "향남읍은 어때?" 류에 답하려면 Top10(시 전체)만으로는
+    부족합니다. 29개 × 한 줄이라 2KB 안팎이고, 격자 786개를 통째로 넣는 것(356KB)과
+    달리 프롬프트에 들어갑니다."""
+    cells = DATA[f"grid_{period}"]["cells"]
+    by: dict = {}
+    for c in cells:
+        r = by.setdefault(c["region"], {"n": 0, "need": 0, "drt": 0, "top": None})
+        r["n"] += 1
+        if c["quadrant"] == "need":
+            r["need"] += 1
+        if c["quadrant"] == "drt":
+            r["drt"] += 1
+        if r["top"] is None or c["priorityScore"] > r["top"]["priorityScore"]:
+            r["top"] = c
+    out = []
+    for name in sorted(by, key=lambda k: -by[k]["need"]):
+        r = by[name]
+        t = r["top"]
+        out.append({
+            "region": name, "cells": r["n"], "needCells": r["need"], "drtCells": r["drt"],
+            "topCell": t["id"], "topCellName": t["name"],
+            "topMi": t["mi"], "topAction": ACTION_LABEL.get(t["action"], t["action"]),
+        })
+    return out
+
+
+def _chat_pack(period: str) -> dict:
+    """프롬프트에 실을 사실 묶음. **모델이 말하는 수치는 전부 여기서만 나와야 합니다.**
+
+    ⚠️ meta 를 통째로 넣지 마세요. meta.map.regions 가 읍면동 경계 폴리곤 좌표라
+       혼자 13.5만 자입니다(전체 meta 의 99%). 챗봇이 읽을 지식이 아닙니다."""
+    meta = DATA["meta"]
+    top = sorted([c for c in DATA[f"grid_{period}"]["cells"]
+                  if c["quadrant"] in ("need", "drt")],
+                 key=lambda c: c["priorityScore"], reverse=True)[:10]
+    return {
+        "개념": {k: meta[k] for k in
+                 ("formula", "assumptions", "cost", "effects", "dataQuality", "grid")
+                 if k in meta},
+        "시간대": meta.get("periods"),
+        "현재시간대": {"id": period, "name": PERIOD_NAME[period], "hours": PERIOD_HOURS[period]},
+        "현재KPI": DATA[f"grid_{period}"]["kpi"],
+        "우선순위Top10": [
+            {"rank": i + 1, "cellId": c["id"], "name": c["name"], "region": c["region"],
+             "mi": c["mi"], "demand": c["demand"], "supply": c["supply"],
+             "coverage": c["coverage"], "action": ACTION_LABEL.get(c["action"], c["action"])}
+            for i, c in enumerate(top)
+        ],
+        "읍면동요약": _region_digest(period),
+        "규모": {"격자": len(DATA[f"grid_{period}"]["cells"]),
+                 "정류장": len(DATA["stops"]["stops"]),
+                 "노선": len(DATA["routes"]["routes"])},
+    }
+
+
+_CHAT_RULES = """당신은 화성시 버스 수요·공급 미스매칭 대시보드의 도우미입니다.
+
+■ 반드시 지킬 것
+- **아래 <사실> 에 없는 수치는 절대 말하지 마세요.** 모르면 "그 수치는 지금 화면
+  데이터에 없습니다" 라고 답하고 어디를 보면 되는지 알려 주세요. 이 제품은 화면에
+  나가는 모든 수치가 실측이어야 한다는 방침을 지킵니다 — 추정치를 지어내면 그 방침이
+  깨집니다.
+- 한국어로, 공무원이 읽을 문장으로 답합니다. 3~5문장으로 짧게. 목록이 필요하면 씁니다.
+- 노선별 이용객수는 산출 불가입니다(승하차가 정류장 단위로만 있고 노선별로 안 나뉨).
+  요청받으면 왜 못 하는지 설명하세요.
+
+■ 응답 형식 — JSON 만, 마크다운 코드블록 없이
+{"reply": "답변 문장", "action": {"type": "none"}}
+
+■ action — 사용자가 무언가를 보고 싶어 하면 **반드시** 채웁니다. 셋 중 하나입니다.
+  {"type":"period","value":"am|day|pm|night"}       시간대 전환
+  {"type":"layer","value":"mi|demand|supply|flow"}  지도 색 기준 전환
+  {"type":"show","query":"향남읍"}                  읍면동·격자ID·버스번호·정류장으로 이동
+
+  "보여줘" · "찾아줘" · "이동해줘" · "어디야?" · "~로 바꿔줘" 는 전부 요청입니다.
+  말로 "이동합니다" 라고만 하고 action 을 none 으로 두면 화면이 그대로라 거짓말이
+  됩니다 — 옮기겠다고 말했으면 action 을 반드시 채우세요.
+  반대로 단순한 설명 질문("MI가 뭐야?")에는 {"type":"none"} 입니다."""
+
+_CHAT_REPORT_RULES = """당신은 화성시 버스 대시보드의 보고서 편집기입니다.
+사용자의 지시대로 **현재 초안**을 고쳐 씁니다.
+
+■ 반드시 지킬 것
+- **수치를 바꾸지 마세요.** 아래 <사실> 과 <현재 초안> 에 있는 숫자만 씁니다.
+  강조·순서·어조·분량은 지시대로 바꾸되 숫자를 새로 만들거나 고치면 안 됩니다.
+- 공문 어조를 유지합니다. 섹션 구조(key)는 그대로 두고 heading·body·bullets 만 고칩니다.
+- 지시가 특정 섹션만 가리키면 그 섹션만 바꾸고 나머지는 그대로 돌려주세요.
+
+■ 응답 형식 — JSON 만, 마크다운 코드블록 없이
+{"reply": "무엇을 어떻게 고쳤는지 한두 문장",
+ "action": {"type":"none"},
+ "draft": {"sections":[{"key":"summary","heading":"…","body":"…","bullets":["…"]}]}}
+
+draft.sections 는 **고친 전체 목록**입니다(안 고친 섹션도 그대로 포함)."""
+
+
+def _call_ai_chat(provider: str, model: str, system: str, messages: list) -> str:
+    """여러 차례 주고받는 호출. 기존 _call_ai 는 단발이라 그대로 두고 옆에 둡니다
+    (보고서 생성이 계속 씁니다)."""
+    import os
+
+    if provider == "claude":
+        try:
+            import anthropic
+        except ImportError:
+            raise HTTPException(500, "pip install anthropic")
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key:
+            raise HTTPException(500, "ANTHROPIC_API_KEY 환경변수가 없습니다.")
+        msg = anthropic.Anthropic(api_key=key).messages.create(
+            model=model, max_tokens=AI_MAX_TOKENS, system=system, messages=messages,
+        )
+        # 최신 모델이 ThinkingBlock 을 먼저 보내므로 첫 블록만 보면 터집니다
+        # (_call_ai 의 같은 자리 주석 참고). 텍스트 블록만 골라 잇습니다.
+        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+
+    if provider == "openai":
+        try:
+            import openai
+        except ImportError:
+            raise HTTPException(500, "pip install openai")
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise HTTPException(500, "OPENAI_API_KEY 환경변수가 없습니다.")
+        resp = openai.OpenAI(api_key=key).chat.completions.create(
+            model=model, max_tokens=AI_MAX_TOKENS,
+            messages=[{"role": "system", "content": system}] + messages,
+        )
+        return resp.choices[0].message.content
+
+    if provider == "gemini":
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise HTTPException(500, "pip install google-generativeai")
+        key = os.environ.get("GOOGLE_API_KEY")
+        if not key:
+            raise HTTPException(500, "GOOGLE_API_KEY 환경변수가 없습니다.")
+        genai.configure(api_key=key)
+        # Gemini 는 system 을 별도 인자로 받고 role 이 user/model 입니다.
+        m = genai.GenerativeModel(model, system_instruction=system)
+        hist = [{"role": ("model" if x["role"] == "assistant" else "user"),
+                 "parts": [x["content"]]} for x in messages]
+        return m.generate_content(hist).text
+
+    raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+
+
+class ChatRequest(BaseModel):
+    mode: str = "help"               # help | report
+    period: str = "am"
+    messages: list = []              # [{role:'user'|'assistant', content}] — 이력은 클라이언트 보관
+    context: dict = {}               # 지금 화면 상태 {cellId, layer, routeId, …}
+    draft: Optional[dict] = None     # mode=report 일 때 현재 초안
+    provider: str = "auto"
+    model: Optional[str] = None
+
+
+def _chat_unavailable(reason: str) -> dict:
+    """키가 없거나 호출이 실패했을 때. **500 을 던지지 않습니다** — 발표장에서 버튼이
+    깨지지 않게 하는 것이 이 서버의 첫 번째 이유입니다
+    (README §8, _fallback_report 와 같은 원리)."""
+    return {"reply": reason, "action": {"type": "none"}, "ok": False}
+
+
+@app.post("/api/v1/chat")
+def chat(req: ChatRequest):
+    _chk_period(req.period)
+    if req.mode not in ("help", "report"):
+        raise HTTPException(400, "mode는 help 또는 report 여야 합니다.")
+
+    msgs = [m for m in req.messages
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str) and m["content"].strip()]
+    msgs = [{"role": m["role"], "content": m["content"][:MAX_CHAT_CHARS]}
+            for m in msgs][-MAX_CHAT_TURNS * 2:]
+    if not msgs or msgs[-1]["role"] != "user":
+        raise HTTPException(400, "마지막 메시지는 user 여야 합니다.")
+
+    provider = _detect_provider() if req.provider == "auto" else req.provider
+    if provider is None:
+        return _chat_unavailable(
+            "AI 키가 설정되어 있지 않아 채팅을 쓸 수 없습니다. .env 에 "
+            "ANTHROPIC_API_KEY · OPENAI_API_KEY · GOOGLE_API_KEY 중 하나를 넣어 주세요."
+        )
+    if provider not in _PROVIDERS:
+        raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+    model = req.model or _default_model(provider)
+
+    kb = CHAT_KB_PATH.read_text("utf-8") if CHAT_KB_PATH.exists() else ""
+    rules = _CHAT_REPORT_RULES if req.mode == "report" else _CHAT_RULES
+    system = (
+        rules
+        + "\n\n<지식>\n" + kb
+        + "\n\n<사실>\n" + json.dumps(_chat_pack(req.period), ensure_ascii=False)
+        + "\n\n<지금 화면>\n" + json.dumps(req.context, ensure_ascii=False)
+    )
+    if req.mode == "report":
+        system += "\n\n<현재 초안>\n" + json.dumps(req.draft or {}, ensure_ascii=False)
+
+    try:
+        text = (_call_ai_chat(provider, model, system, msgs) or "").strip()
+    except Exception as e:
+        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+        return _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail}).")
+
+    out = _extract_json(text)
+    if not isinstance(out, dict) or not isinstance(out.get("reply"), str):
+        # 형식은 틀렸어도 사람이 읽을 말은 왔을 수 있으니 통째로 버리지 않습니다.
+        # 다만 JSON 조각이 화면에 노출되면 안 되므로 첫 중괄호 앞까지만 씁니다.
+        plain = text.split("{", 1)[0].strip() or "AI 응답을 해석하지 못했습니다."
+        return {"reply": plain[:1500], "action": {"type": "none"}, "ok": True,
+                "provider": _PROVIDERS[provider]["label"], "model": model}
+
+    act = out.get("action") or {"type": "none"}
+    if not isinstance(act, dict) or act.get("type") not in ("period", "layer", "show", "none"):
+        act = {"type": "none"}
+    res = {"reply": out["reply"], "action": act, "ok": True,
+           "provider": _PROVIDERS[provider]["label"], "model": model}
+    if req.mode == "report" and isinstance(out.get("draft"), dict):
+        res["draft"] = out["draft"]
+    return _json(res)
