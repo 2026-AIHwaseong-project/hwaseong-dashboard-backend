@@ -2,7 +2,7 @@
 
 > **Base URL** `http://localhost:8000`  
 > **버전** v1 · **업데이트** 2026-08-13  
-> **기동** `pip install -r requirements.txt` → `python main.py` ([README §5](../README.md#5-빠른-실행))  
+> **기동** `pip install -r requirements.txt` → `python main.py` ([README §1](../README.md#1-빠른-실행))  
 > **Docker** `docker compose up --build`
 >
 > 이 문서가 엔드포인트 계약의 정본입니다. 응답 예시는 실서버(`/openapi.json`) 기준입니다.
