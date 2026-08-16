@@ -2,7 +2,7 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # 외부 공개는 caddy 만. 로컬 디버그용으로만 열어둔다.
     env_file:
       - .env
     environment:
@@ -17,6 +17,22 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s   # Poisson 회귀 로드 대기
+
+  # Caddy — Cloudflare Pages(HTTPS 고정)가 이 API 를 부르려면 API 도 HTTPS 여야 한다.
+  #   sslip.io 가 호스트명을 IP 로 풀어주고, Caddy 가 그 이름으로 Let's Encrypt
+  #   인증서를 자동 발급·갱신한다. 도메인 구매·수동 인증서 갱신이 필요 없다.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on:
+      - api
 
   # PostgreSQL + PostGIS — 관리자 수정·실시간용. 기본 기동에는 안 뜹니다.
   #
@@ -48,4 +64,6 @@ services:
       retries: 10
 
 volumes:
+  caddy_data:      # Let's Encrypt 인증서 — 없으면 재기동마다 재발급 시도하다 rate limit 에 걸릴 수 있다
+  caddy_config:
   pgdata:
