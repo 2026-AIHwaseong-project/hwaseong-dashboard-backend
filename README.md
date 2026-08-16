@@ -598,6 +598,86 @@ Docker 로도 됩니다 — `docker compose up --build`.
 
 프론트 저장소가 없으면 마운트를 건너뛰고 API 만 뜹니다.
 
+### PostgreSQL + PostGIS 로 띄우기 (선택)
+
+**먼저: 지금 이걸 켤 필요가 있는지부터 보세요.** 기본 실행은 계약 JSON 으로 완전히
+동작하고, 화면·API·시뮬레이션·AI 보고서까지 전부 같습니다. DB 가 실제로 필요한 것은
+**관리자 수정·실시간** 확장 하나뿐입니다(근거는 §8). 발표·시연이 목적이면 켜지 마세요 —
+컨테이너가 하나 더 뜨고 장애 지점이 하나 늘어납니다.
+
+필요한 것은 Docker 와 psycopg2 드라이버뿐입니다. `requirements.txt` 에는
+`psycopg2-binary` 가 **주석 처리돼 있어** 따로 설치해야 합니다.
+
+```bash
+# 1. DB 컨테이너를 띄웁니다. --profile db 가 없으면 안 뜹니다(기본 기동 보호)
+docker compose --profile db up -d db
+
+# 2. 드라이버 설치
+pip install psycopg2-binary
+
+# 3. 접속 주소를 정합니다 — 아래 두 방법 중 하나
+export DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong   # 셸에만
+#   또는 .env 에 한 줄 (96행에 주석으로 들어 있습니다 — # 만 지우면 됩니다)
+
+# 4. 계약 JSON 을 DB 로 적재 (45MB 파이프라인을 다시 돌리지 않습니다)
+python analysis/06_load_db.py
+
+# 5. JSON 과 DB 가 같은 것을 내놓는지 확인 — 종료 코드 = 다른 항목 수
+python analysis/06_verify_db.py
+
+# 6. 서버 기동
+python main.py
+```
+
+접속 정보는 `docker-compose.yml` 에 박혀 있습니다 — DB `hwaseong` · 계정 `hw` ·
+비밀번호 `hw_pass` · 포트 5432 · 이미지 `postgis/postgis:16-3.4-alpine`.
+개발용 기본값이므로 **외부에 노출되는 곳에서는 반드시 바꾸세요.**
+
+#### 켜졌는지 확인하는 법
+
+서버가 기동할 때 찍는 한 줄로 갈립니다.
+
+| 기동 로그 | 상태 |
+|---|---|
+| `[server] DB 에서 로드. <run>, 관리자 수정 N건` | DB 를 읽고 있습니다 |
+| `[server] 계약 JSON 에서 로드` | JSON 입니다 — `DATABASE_URL` 이 없거나 연결에 실패 |
+| `[db] DATABASE_URL 연결 실패. JSON 으로 갑니다: …` | 켰다고 믿었지만 JSON 입니다 |
+
+**연결에 실패해도 서버는 뜹니다.** `server/db.py` 가 경고를 찍고 계약 JSON 으로
+내려갑니다 — 시연 중 DB 가 죽어도 화면은 삽니다. 다만 조용히 넘어가지는 않습니다.
+"DB 를 켰다고 믿으면서 실제로는 JSON 을 읽는" 상태가 가장 나쁘기 때문입니다.
+
+`06_verify_db.py` 는 8개 페이로드를 **직렬화 바이트까지** 맞춰 보고, 격자 배열 순서도
+따로 확인합니다. 값이 같아도 순서가 다르면 `/api/v1/priorities` 의 동점 구간 순위가
+조용히 바뀌기 때문입니다(§8).
+
+#### 스키마와 적재 규칙
+
+`server/schema_ops.sql` 이 **빈 볼륨으로 처음 뜰 때만** 자동 실행됩니다. 스키마를 고친
+뒤에는 볼륨을 지울 필요 없이 `06_load_db.py` 가 매번 다시 걸어 줍니다(전부
+`IF NOT EXISTS` / `OR REPLACE`). 만드는 것은 PostGIS 확장, `batch_*` 8개,
+`admin_grid_override`, `v_grid_cell`·`v_grid_metrics`·`v_grid_override` 뷰,
+그리고 확장용 `scenario`·`audit_log`·`app_user`·`rt_bus_position` 입니다.
+
+적재는 `batch_run` 시작 → `batch_*` TRUNCATE → INSERT → PostGIS 도형 생성 →
+완료까지 **한 트랜잭션**이라, 도중에 죽으면 이전 내용이 그대로 남습니다.
+**`admin_*` 는 TRUNCATE 대상이 아닙니다** — 배치를 몇 번 돌려도 사람이 고친 값이
+살아남아야 하기 때문이고, 이게 이 스키마의 요점입니다(§8).
+
+#### 문제가 생기면
+
+| 증상 | 원인과 조치 |
+|---|---|
+| `psycopg2 가 없습니다` | `pip install psycopg2-binary` |
+| `DATABASE_URL 이 없습니다` | 3번 단계를 건너뛰었습니다. `.env` 에 적었다면 `#` 을 지웠는지 확인 |
+| 연결 거부 | 컨테이너가 안 떴습니다. `--profile db` 없이 `up` 하면 `db` 는 안 뜹니다. `docker compose ps` 로 확인 |
+| 적재는 됐는데 서버가 JSON 을 읽음 | 서버를 띄운 셸에 `DATABASE_URL` 이 없습니다. `06_load_db.py` 를 돌린 셸과 다른 셸이면 흔합니다 |
+| `06_verify_db` 가 FAIL | 계약 JSON 을 다시 만든 뒤 적재를 안 했을 가능성. `python main.py --setup` 후 `06_load_db.py` 재실행 |
+| 처음부터 다시 | `docker compose --profile db down -v` (볼륨까지 삭제) 후 1번부터 |
+
+DB 를 끄고 원래대로 돌아가려면 `DATABASE_URL` 을 지우고 서버를 다시 띄우면 됩니다.
+컨테이너는 `docker compose --profile db stop db` 로 세웁니다.
+
 ### API 키가 필요한 경우
 
 평소에는 필요 없습니다. 두 경우에만 씁니다.
@@ -841,19 +921,13 @@ pyproj 를 부르지 않으려고 lon/lat → 5179 변환을 2차 다항 회귀�
 
 ### PostgreSQL — 기본은 안 쓰고, 켤 수는 있습니다
 
-> **이 절은 `feat/postgres-dev` 브랜치에서 갱신됐습니다.** 기본 동작은 그대로입니다 —
-> `docker compose up` 도, `python main.py` 도 계약 JSON 으로 돕니다. DB 는 켜야만 붙습니다.
+> **설치·실행 방법은 §5 「PostgreSQL + PostGIS 로 띄우기」에 있습니다.** 이 절은
+> *왜 이렇게 설계했는가*만 다룹니다.
 >
-> ```bash
-> docker compose --profile db up -d      # DB 는 profiles 뒤에 있어 기본 기동에는 안 뜸
-> pip install psycopg2-binary
-> DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong python analysis/06_load_db.py
-> DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong python analysis/06_verify_db.py
-> ```
->
-> `DATABASE_URL` 이 없으면 JSON, 있으면 DB(`v_*` 뷰)에서 읽습니다. **연결에 실패하면
-> 경고를 찍고 JSON 으로 내려가므로 발표 중 DB 가 죽어도 화면은 삽니다** — 아래에서
-> 걱정한 "장애 지점이 하나 는다"에 대한 답입니다.
+> 기본 동작은 DB 를 붙이기 전과 같습니다 — `docker compose up` 도 `python main.py` 도
+> 계약 JSON 으로 돕니다. `DATABASE_URL` 이 있어야만 DB(`v_*` 뷰)를 읽고, 연결에
+> 실패하면 경고를 찍고 JSON 으로 내려갑니다. 아래에서 걱정한 "장애 지점이 하나
+> 는다"에 대한 답이 이 폴백입니다.
 
 파이프라인이 CSV·JSON 직결이고 서버는 기동 시 `server/static/` 을 메모리에 올립니다.
 
