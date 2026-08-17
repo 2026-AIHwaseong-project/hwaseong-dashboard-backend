@@ -1306,15 +1306,29 @@ _CHAT_RULES = """당신은 화성시 버스 수요·공급 미스매칭 대시�
 ■ 응답 형식 — JSON 만, 마크다운 코드블록 없이
 {"reply": "답변 문장", "action": {"type": "none"}}
 
-■ action — 사용자가 무언가를 보고 싶어 하면 **반드시** 채웁니다. 셋 중 하나입니다.
+■ action — 사용자가 무언가를 보거나 시키고 싶어 하면 **반드시** 채웁니다.
   {"type":"period","value":"am|day|pm|night"}       시간대 전환
   {"type":"layer","value":"mi|demand|supply|flow"}  지도 색 기준 전환
   {"type":"show","query":"향남읍"}                  읍면동·격자ID·버스번호·정류장으로 이동
+  {"type":"recommend"}                              AI 추천 배치안 계산(시뮬레이션 화면 전용)
+  {"type":"nav","page":"dashboard|simulation","query":"선택","after":{...선택, 도착 후 이어 할 action 1개}}
+                                                     다른 화면으로 이동
 
-  "보여줘" · "찾아줘" · "이동해줘" · "어디야?" · "~로 바꿔줘" 는 전부 요청입니다.
-  말로 "이동합니다" 라고만 하고 action 을 none 으로 두면 화면이 그대로라 거짓말이
-  됩니다 — 옮기겠다고 말했으면 action 을 반드시 채우세요.
-  반대로 단순한 설명 질문("MI가 뭐야?")에는 {"type":"none"} 입니다."""
+  "보여줘" · "찾아줘" · "이동해줘" · "어디야?" · "~로 바꿔줘" · "눌러줘/계산해줘/추천해줘" 는
+  전부 요청입니다. 말로 "했습니다" 라고만 하고 action 을 none 으로 두면 화면은 그대로라
+  거짓말이 됩니다 — 하겠다고 말했으면 action 을 반드시 채우세요.
+  반대로 단순한 설명 질문("MI가 뭐야?")에는 {"type":"none"} 입니다.
+
+  **<지금 화면> 의 `이화면에서_가능` 목록에 없는 걸 요청받으면**, "화면 데이터에
+  없습니다" 라고 답하지 마세요 — 그건 그 화면에 없을 뿐 서비스엔 있는 기능입니다.
+  대신 nav 로 필요한 화면부터 옮기세요:
+    - 지금 화면에서 바로 되면(목록에 있으면) 해당 action 하나만.
+    - 다른 화면의 기능이면 nav 를 쓰고, 옮기자마자 이어서 할 일이 있으면 그 action 을
+      nav.after 에 실으세요(예: 시뮬레이션 화면으로 옮기며 AI 추천도 같이 —
+      {"type":"nav","page":"simulation","after":{"type":"recommend"}}).
+    - nav.query 는 dashboard 로 갈 땐 읍면동·격자ID 등 검색어, simulation 으로 갈 땐
+      <사실> 에 나온 실제 격자ID(예: "다사6707")만 쓰세요 — 지어내면 그 격자를 못 찾습니다.
+    - 이미 그 화면이면 nav 를 쓰지 말고 그 화면의 action 을 바로 쓰세요."""
 
 _CHAT_REPORT_RULES = """당신은 화성시 버스 대시보드의 보고서 편집기입니다.
 사용자의 지시대로 **현재 초안**을 고쳐 씁니다.
@@ -1452,7 +1466,9 @@ def chat(req: ChatRequest):
                 "provider": _PROVIDERS[provider]["label"], "model": model}
 
     act = out.get("action") or {"type": "none"}
-    if not isinstance(act, dict) or act.get("type") not in ("period", "layer", "show", "none"):
+    if not isinstance(act, dict) or act.get("type") not in (
+        "period", "layer", "show", "recommend", "nav", "none"
+    ):
         act = {"type": "none"}
     res = {"reply": out["reply"], "action": act, "ok": True,
            "provider": _PROVIDERS[provider]["label"], "model": model}
