@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -1066,9 +1066,8 @@ class ReportRequest(BaseModel):
 
 
 @app.post("/api/v1/reports/draft")
-def draft_report(req: ReportRequest, request: Request):
+def draft_report(req: ReportRequest):
     _chk_period(req.period)
-    _rate_limit(request, "report", limit=5, window_s=60)
 
     provider = _detect_provider() if req.provider == "auto" else req.provider
     if provider is not None and provider not in _PROVIDERS:
@@ -1190,26 +1189,6 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 CHAT_KB_PATH = ROOT / "server" / "chat_kb.md"
 MAX_CHAT_CHARS = 2000      # 사용자 입력 한 번의 상한
 MAX_CHAT_TURNS = 10        # 서버로 넘어오는 이력 상한 (프롬프트 폭주 방지)
-
-# ─── AI 호출 레이트리밋 ─────────────────────────────────────────────────────
-# 인증이 없는 공개 엔드포인트인데 호출마다 실제 돈이 나간다. workers=1 이 고정이라
-# (05_simulate.py 가 프로세스 공유 안 됨 — Dockerfile 참고) 프로세스 전역 dict 로 충분하다.
-# ponytail: IP 키는 안 지워진다 — 심사 기간 트래픽 규모면 문제없다. 오래 돌릴 거면 TTL 캐시로.
-_RATE_HITS: dict[str, list] = {}
-
-
-def _rate_limit(request: Request, bucket: str, limit: int, window_s: int = 60):
-    """caddy 뒤에 있으므로 클라이언트 IP 는 X-Forwarded-For 의 마지막 값
-    (=caddy 가 실제로 접속을 받은 상대)을 쓴다 — 앞쪽 값은 클라이언트가 지어낼 수 있다."""
-    xff = request.headers.get("x-forwarded-for", "")
-    ip = xff.split(",")[-1].strip() if xff else (request.client.host if request.client else "unknown")
-    key = f"{bucket}:{ip}"
-    now = time.time()
-    hits = [t for t in _RATE_HITS.get(key, []) if now - t < window_s]
-    if len(hits) >= limit:
-        raise HTTPException(429, f"요청이 너무 많습니다. {window_s}초 후 다시 시도해 주세요.")
-    hits.append(now)
-    _RATE_HITS[key] = hits
 
 
 def _extract_json(text: str):
@@ -1424,11 +1403,10 @@ def _chat_unavailable(reason: str) -> dict:
 
 
 @app.post("/api/v1/chat")
-def chat(req: ChatRequest, request: Request):
+def chat(req: ChatRequest):
     _chk_period(req.period)
     if req.mode not in ("help", "report"):
         raise HTTPException(400, "mode는 help 또는 report 여야 합니다.")
-    _rate_limit(request, "chat", limit=10, window_s=60)
 
     msgs = [m for m in req.messages
             if isinstance(m, dict) and m.get("role") in ("user", "assistant")
