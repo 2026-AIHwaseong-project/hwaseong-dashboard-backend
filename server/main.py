@@ -789,6 +789,11 @@ def run_recommendations(req: RecRequest):
     resolved_trips = max(0, -int(am_blk["delta"]["potentialTripsPerDay"]))
     resolved_eld   = max(0, -int(am_blk["delta"]["elderlyTripsPerDay"]))
 
+    # 실제 설정된 프로바이더를 그대로 씁니다 — "Claude" 로 못박아 두면 .env 를
+    # gemini 로 바꿔도 화면엔 계속 Claude 라고 나갑니다(실측: 여기만 놓쳤었음).
+    narrative_provider = _detect_provider()
+    narrative_label = _PROVIDERS[narrative_provider]["label"] if narrative_provider else "AI 미설정 — 규칙 기반 초안"
+
     result = {
         "method": "budget-constrained greedy marginal benefit",
         "methodLabel": "예산 제약 하 한계효과 최대화",
@@ -811,7 +816,7 @@ def run_recommendations(req: RecRequest):
         "placements": items,
         "producedBy": {
             "placements": "최적화 알고리즘 (예산 제약 하 그리디)",
-            "narrative": "Claude",
+            "narrative": narrative_label,
             "deterministic": True,
             "deterministicNote": "같은 조건이면 항상 같은 결과가 나옵니다. "
                                  "다른 안이 필요하면 난수가 아니라 전략(목적)을 바꿉니다.",
