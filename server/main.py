@@ -1024,6 +1024,31 @@ AI_QUEUE_TIMEOUT_S   = float(os.environ.get("AI_QUEUE_TIMEOUT_S", "25"))
 AI_REQUEST_TIMEOUT_S = float(os.environ.get("AI_REQUEST_TIMEOUT_S", "120"))
 AI_MAX_RETRIES       = int(os.environ.get("AI_MAX_RETRIES", "2"))
 
+# ─── 속도 — thinking budget · 챗봇 토큰 상한 ──────────────────────────────
+#
+#  실측(2026-08): 같은 질문 두 문장 답에 9~44초가 걸렸는데, 그중 39초 이상이
+#  "생각"이었고 실제 글자가 나오는 건 마지막 0.1초 안쪽이었다(스트리밍이 안 도와줌).
+#  Gemini 는 thinking_budget=0 도 thinking_level="off" 도 이 모델에서 거부한다
+#  (400) — 완전히 끄는 건 안 되고 낮추는 것만 된다. 128 은 실측으로 통과했다.
+#  같은 값도 실행마다 편차가 커서(9초~44초) 이 값이 "항상 빠르게"를 보장하진
+#  않는다 — 최악을 낮추는 것이지 편차 자체를 없애는 게 아니다.
+#
+#  컨텍스트 캐싱(cached_content)도 실측했지만 뺐다 — Gemini API가 `cached_content`
+#  와 `system_instruction`을 같이 못 받는 제약이 있어(400) 프롬프트 조립을 통째로
+#  갈라야 했고, 그 갈라진 구조에서 report 모드가 max_tokens 캡과 얽혀 실제로
+#  깨졌다(6섹션 초안 수정이 잘림). 속도 이득도 편차 폭 안에 묻혀 확실치 않았다 —
+#  복잡도만 늘고 이득은 불확실해서 걷어냈다.
+AI_THINKING_BUDGET = int(os.environ.get("AI_THINKING_BUDGET", "256"))
+
+#  챗봇 답은 _CHAT_RULES 가 3~5문장으로 못박아 둔다. AI_MAX_TOKENS(8192)는
+#  보고서용 — 6개 섹션짜리라 그대로 둔다. 챗봇 help 모드에만 낮은 상한을 따로 둔다
+#  (report 모드는 안 고친 섹션까지 포함해 draft.sections 전체를 되돌려줘야 해서
+#  낮은 캡을 쓰면 잘린다 — chat() 참고).
+#  1024로 실측했을 때 목록형 답이 1011자까지 나온 사례가 있어(문장은 안 잘렸지만
+#  여유가 크지 않았다) 2048로 올렸다 — 보통 답은 수백 자라 흔한 경우엔 비용·속도
+#  차이가 없고, 꼬리 쪽(긴 목록 답)에서 잘릴 위험만 줄인다.
+AI_CHAT_MAX_TOKENS = int(os.environ.get("AI_CHAT_MAX_TOKENS", "2048"))
+
 _ai_sem: Optional[asyncio.Semaphore] = None
 _ai_clients: dict = {}
 
@@ -1083,11 +1108,12 @@ def _ai_client(provider: str):
         )
     elif provider == "gemini":
         try:
-            import google.generativeai as genai
+            from google import genai as genai_sdk
         except ImportError:
-            raise HTTPException(500, "pip install google-generativeai")
-        genai.configure(api_key=key)   # 이 SDK 는 키가 모듈 전역이라 한 번만 건다
-        client = genai
+            raise HTTPException(500, "pip install google-genai")
+        # google-generativeai(구버전)에서 옮겨왔다 — thinking budget이 그 SDK의
+        # GenerationConfig 프로토콜엔 필드 자체가 없었다(실측 확인).
+        client = genai_sdk.Client(api_key=key)
     else:
         raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
 
@@ -1096,7 +1122,7 @@ def _ai_client(provider: str):
 
 
 async def _astream_ai(provider: str, model: str, system: Optional[str],
-                      messages: list) -> AsyncIterator[str]:
+                      messages: list, *, max_tokens: int = AI_MAX_TOKENS) -> AsyncIterator[str]:
     """프로바이더 3종을 한 입구로 모은 스트리밍 호출. 텍스트 조각을 순서대로 낸다.
 
     보고서 생성(단발)과 챗봇(여러 차례)이 예전에는 `_call_ai` / `_call_ai_chat` 두
@@ -1111,7 +1137,7 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
     client = _ai_client(provider)
 
     if provider == "claude":
-        kw = {"model": model, "max_tokens": AI_MAX_TOKENS, "messages": messages}
+        kw = {"model": model, "max_tokens": max_tokens, "messages": messages}
         if system:
             kw["system"] = system
         async with client.messages.stream(**kw) as stream:
@@ -1124,7 +1150,7 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
     if provider == "openai":
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
         stream = await client.chat.completions.create(
-            model=model, max_tokens=AI_MAX_TOKENS, messages=msgs, stream=True,
+            model=model, max_tokens=max_tokens, messages=msgs, stream=True,
         )
         async for ev in stream:
             if not ev.choices:
@@ -1135,28 +1161,35 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
         return
 
     if provider == "gemini":
-        # Gemini 는 system 을 별도 인자로 받고 role 이 user/model 입니다.
-        m = client.GenerativeModel(model, system_instruction=system or None)
-        hist = [{"role": ("model" if x["role"] == "assistant" else "user"),
-                 "parts": [x["content"]]} for x in messages]
-        resp = await m.generate_content_async(hist, stream=True)
-        async for ev in resp:
-            piece = getattr(ev, "text", None)
-            if piece:
-                yield piece
+        from google.genai import types as gtypes
+
+        contents = [gtypes.Content(role=("model" if x["role"] == "assistant" else "user"),
+                                    parts=[gtypes.Part(text=x["content"])])
+                    for x in messages]
+        cfg = gtypes.GenerateContentConfig(
+            system_instruction=system or None, max_output_tokens=max_tokens,
+            thinking_config=gtypes.ThinkingConfig(thinking_budget=AI_THINKING_BUDGET),
+        )
+        stream = await client.aio.models.generate_content_stream(
+            model=model, contents=contents, config=cfg,
+        )
+        async for ev in stream:
+            if ev.text:
+                yield ev.text
         return
 
     raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
 
 
 async def _acall_ai(provider: str, model: str, system: Optional[str],
-                    messages: list) -> str:
+                    messages: list, *, max_tokens: int = AI_MAX_TOKENS) -> str:
     """스트리밍을 다 모아 한 문자열로. 슬롯을 잡고 전체 시간도 제한한다."""
     async with _ai_slot():
         parts: list = []
 
         async def _drain():
-            async for piece in _astream_ai(provider, model, system, messages):
+            async for piece in _astream_ai(provider, model, system, messages,
+                                           max_tokens=max_tokens):
                 parts.append(piece)
 
         try:
@@ -1622,8 +1655,8 @@ async def _sse_once(payload: dict) -> AsyncIterator[str]:
     yield _sse("done", payload)
 
 
-async def _chat_sse(provider: str, model: str, system: str,
-                    msgs: list, mode: str) -> AsyncIterator[str]:
+async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: str,
+                    *, max_tokens: int = AI_MAX_TOKENS) -> AsyncIterator[str]:
     """조각이 오는 대로 reply 를 흘리고, 끝나면 최종 구조를 done 으로 한 번 더 보낸다.
 
     화면은 delta 로 글자를 채우다가 done 에서 action·draft 를 받습니다. 중간에 끊겨도
@@ -1633,7 +1666,8 @@ async def _chat_sse(provider: str, model: str, system: str,
     try:
         async with _ai_slot():
             deadline = time.monotonic() + AI_REQUEST_TIMEOUT_S
-            async for piece in _astream_ai(provider, model, system, msgs):
+            async for piece in _astream_ai(provider, model, system, msgs,
+                                           max_tokens=max_tokens):
                 raw.append(piece)
                 grown = ex.feed(piece)
                 if grown:
@@ -1692,11 +1726,18 @@ async def chat(req: ChatRequest):
     if req.mode == "report":
         system += "\n\n<현재 초안>\n" + json.dumps(req.draft or {}, ensure_ascii=False)
 
+    # report 모드는 안 고친 섹션까지 포함해 draft.sections 전체를 되돌려줘야 한다
+    # (_CHAT_REPORT_RULES) — 6개 섹션짜리 초안이면 1024로는 잘린다(실측: 57초 걸리고
+    # JSON 파싱 실패로 떨어짐). 낮은 캡은 짧은 대화형 답만 오는 help 모드에만 쓴다.
+    max_tokens = AI_CHAT_MAX_TOKENS if req.mode == "help" else AI_MAX_TOKENS
+
     if req.stream:
-        return _sse_response(_chat_sse(provider, model, system, msgs, req.mode))
+        return _sse_response(_chat_sse(provider, model, system, msgs, req.mode,
+                                       max_tokens=max_tokens))
 
     try:
-        text = (await _acall_ai(provider, model, system, msgs) or "").strip()
+        text = (await _acall_ai(provider, model, system, msgs,
+                                max_tokens=max_tokens) or "").strip()
     except AIBusy:
         return _chat_unavailable(_CHAT_BUSY)
     except Exception as e:
