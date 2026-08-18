@@ -22,18 +22,20 @@
 """
 import importlib.util
 import json
+import asyncio
 import os
 import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1005,60 +1007,169 @@ def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
 AI_MAX_TOKENS = 8192
 
 
-def _call_ai(provider: str, model: str, prompt: str) -> str:
-    """프로바이더별 API 호출 → 텍스트 반환."""
-    import os
+# ─── AI 호출 코어 — 여러 사람이 동시에 눌러도 버티게 ──────────────────────────
+#
+#  예전에는 이 파일의 AI 호출이 전부 동기 함수였습니다. FastAPI 는 `def` 핸들러를
+#  anyio 스레드풀에서 돌리는데, 이 파일의 **다른 엔드포인트도 전부 `def`** 라
+#  같은 풀을 나눠 씁니다. AI 호출 하나가 수십 초 붙들면 그 시간만큼 스레드가 묶이고,
+#  발표장에서 여러 명이 동시에 챗봇을 두드리면 /grid·/meta 같은 조회까지 멎습니다.
+#  그래서 AI 경로만 `async def` 로 바꿔 스레드를 아예 점유하지 않게 했습니다.
+#
+#  ⚠️ IP 당 레이트리밋으로 막지 않습니다. 53073f2 에서 넣었다가 094ebeb 에서
+#     되돌린 이유 그대로입니다 — 행사장 WiFi 뒤 심사위원 여럿이 같은 IP 로 잡혀
+#     정상 사용자가 429 를 봅니다. 대신 **거절하지 않고 줄을 세웁니다**:
+#     동시 호출 수만 세마포어로 묶고 나머지는 잠깐 기다렸다 들어갑니다.
+AI_MAX_CONCURRENCY   = int(os.environ.get("AI_MAX_CONCURRENCY", "6"))
+AI_QUEUE_TIMEOUT_S   = float(os.environ.get("AI_QUEUE_TIMEOUT_S", "25"))
+AI_REQUEST_TIMEOUT_S = float(os.environ.get("AI_REQUEST_TIMEOUT_S", "120"))
+AI_MAX_RETRIES       = int(os.environ.get("AI_MAX_RETRIES", "2"))
+
+_ai_sem: Optional[asyncio.Semaphore] = None
+_ai_clients: dict = {}
+
+
+class AIBusy(Exception):
+    """줄이 너무 길어 대기 상한을 넘겼다. 500 이 아니라 안내 문구로 나갑니다."""
+
+
+@asynccontextmanager
+async def _ai_slot():
+    """동시 호출 슬롯 하나를 잡는다. 못 잡으면 AIBusy."""
+    global _ai_sem
+    if _ai_sem is None:                      # 이벤트 루프 안에서 처음 만든다
+        _ai_sem = asyncio.Semaphore(AI_MAX_CONCURRENCY)
+    try:
+        await asyncio.wait_for(_ai_sem.acquire(), AI_QUEUE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise AIBusy()
+    try:
+        yield
+    finally:
+        _ai_sem.release()
+
+
+def _ai_client(provider: str):
+    """프로바이더별 비동기 클라이언트 — **프로세스에 하나만** 만들어 재사용한다.
+
+    예전에는 요청마다 새로 만들었습니다. 그러면 호출마다 TLS 핸드셰이크를 다시 하고
+    커넥션 풀도 매번 버려집니다. 동시 요청이 몰릴 때 가장 먼저 티가 나는 낭비입니다.
+    타임아웃·재시도도 여기서 한 번만 못박습니다(SDK 기본값에 맡기지 않습니다).
+    """
+    if provider in _ai_clients:
+        return _ai_clients[provider]
+
+    cfg = _PROVIDERS.get(provider)
+    if cfg is None:
+        raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+    key = os.environ.get(cfg["env"])
+    if not key:
+        raise HTTPException(500, f"{cfg['env']} 환경변수가 없습니다.")
 
     if provider == "claude":
         try:
             import anthropic
         except ImportError:
             raise HTTPException(500, "pip install anthropic")
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise HTTPException(500, "ANTHROPIC_API_KEY 환경변수가 없습니다.")
-        client = anthropic.Anthropic(api_key=key)
-        msg = client.messages.create(
-            model=model,
-            max_tokens=AI_MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
+        client = anthropic.AsyncAnthropic(
+            api_key=key, timeout=AI_REQUEST_TIMEOUT_S, max_retries=AI_MAX_RETRIES,
         )
-        # content[0] 이 항상 텍스트인 게 아니다. 최신 모델은 ThinkingBlock 을
-        # 먼저 넣어 보내는데, 첫 블록만 보면
-        #   AttributeError: 'ThinkingBlock' object has no attribute 'text'
-        # 로 죽는다(실측). 텍스트 블록만 골라 이어붙인다.
-        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-
-    if provider == "openai":
+    elif provider == "openai":
         try:
             import openai
         except ImportError:
             raise HTTPException(500, "pip install openai")
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            raise HTTPException(500, "OPENAI_API_KEY 환경변수가 없습니다.")
-        client = openai.OpenAI(api_key=key)
-        resp = client.chat.completions.create(
-            model=model,
-            max_tokens=AI_MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
+        client = openai.AsyncOpenAI(
+            api_key=key, timeout=AI_REQUEST_TIMEOUT_S, max_retries=AI_MAX_RETRIES,
         )
-        return resp.choices[0].message.content
-
-    if provider == "gemini":
+    elif provider == "gemini":
         try:
             import google.generativeai as genai
         except ImportError:
             raise HTTPException(500, "pip install google-generativeai")
-        key = os.environ.get("GOOGLE_API_KEY")
-        if not key:
-            raise HTTPException(500, "GOOGLE_API_KEY 환경변수가 없습니다.")
-        genai.configure(api_key=key)
-        m = genai.GenerativeModel(model)
-        resp = m.generate_content(prompt)
-        return resp.text
+        genai.configure(api_key=key)   # 이 SDK 는 키가 모듈 전역이라 한 번만 건다
+        client = genai
+    else:
+        raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+
+    _ai_clients[provider] = client
+    return client
+
+
+async def _astream_ai(provider: str, model: str, system: Optional[str],
+                      messages: list) -> AsyncIterator[str]:
+    """프로바이더 3종을 한 입구로 모은 스트리밍 호출. 텍스트 조각을 순서대로 낸다.
+
+    보고서 생성(단발)과 챗봇(여러 차례)이 예전에는 `_call_ai` / `_call_ai_chat` 두
+    벌로 갈라져 있었습니다. 프로바이더가 늘 때마다 두 곳을 같이 고쳐야 해서 한 곳으로
+    합쳤습니다 — 보고서는 system 없이 user 한 통을 보내는 특수한 경우일 뿐입니다.
+
+    **비스트리밍 응답에도 내부적으로는 스트리밍을 씁니다.** 두 가지 이유입니다.
+    ① 긴 응답에서 HTTP 유휴 타임아웃에 걸리지 않습니다.
+    ② 요즘 모델은 사고(thinking) 토큰이 max_tokens 를 함께 먹습니다. 한 번에 받으면
+       사고가 길어진 날 본문이 잘려 "JSON 파싱 실패"로 떨어집니다(위 주석의 그 사고).
+    """
+    client = _ai_client(provider)
+
+    if provider == "claude":
+        kw = {"model": model, "max_tokens": AI_MAX_TOKENS, "messages": messages}
+        if system:
+            kw["system"] = system
+        async with client.messages.stream(**kw) as stream:
+            # text_stream 은 텍스트 블록만 흘려 줍니다. 최신 모델이 앞에 붙이는
+            # ThinkingBlock 을 직접 걸러낼 필요가 없어졌습니다(예전 버그 자리).
+            async for chunk in stream.text_stream:
+                yield chunk
+        return
+
+    if provider == "openai":
+        msgs = ([{"role": "system", "content": system}] if system else []) + messages
+        stream = await client.chat.completions.create(
+            model=model, max_tokens=AI_MAX_TOKENS, messages=msgs, stream=True,
+        )
+        async for ev in stream:
+            if not ev.choices:
+                continue
+            piece = ev.choices[0].delta.content
+            if piece:
+                yield piece
+        return
+
+    if provider == "gemini":
+        # Gemini 는 system 을 별도 인자로 받고 role 이 user/model 입니다.
+        m = client.GenerativeModel(model, system_instruction=system or None)
+        hist = [{"role": ("model" if x["role"] == "assistant" else "user"),
+                 "parts": [x["content"]]} for x in messages]
+        resp = await m.generate_content_async(hist, stream=True)
+        async for ev in resp:
+            piece = getattr(ev, "text", None)
+            if piece:
+                yield piece
+        return
 
     raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+
+
+async def _acall_ai(provider: str, model: str, system: Optional[str],
+                    messages: list) -> str:
+    """스트리밍을 다 모아 한 문자열로. 슬롯을 잡고 전체 시간도 제한한다."""
+    async with _ai_slot():
+        parts: list = []
+
+        async def _drain():
+            async for piece in _astream_ai(provider, model, system, messages):
+                parts.append(piece)
+
+        try:
+            await asyncio.wait_for(_drain(), AI_REQUEST_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 오지 않았습니다.")
+        return "".join(parts)
+
+
+def _call_ai(provider: str, model: str, prompt: str) -> str:
+    """동기 진입점 — scripts/test_ai.py 가 이 이름으로 씁니다. 서버는 쓰지 않습니다."""
+    return asyncio.run(_acall_ai(provider, model, None,
+                                 [{"role": "user", "content": prompt}]))
 
 
 class ReportRequest(BaseModel):
@@ -1072,7 +1183,7 @@ class ReportRequest(BaseModel):
 
 
 @app.post("/api/v1/reports/draft")
-def draft_report(req: ReportRequest):
+async def draft_report(req: ReportRequest):
     _chk_period(req.period)
 
     provider = _detect_provider() if req.provider == "auto" else req.provider
@@ -1147,7 +1258,8 @@ def draft_report(req: ReportRequest):
 JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 
     try:
-        text = _call_ai(provider, model, prompt).strip()
+        text = (await _acall_ai(provider, model, None,
+                                [{"role": "user", "content": prompt}])).strip()
         # 코드펜스 벗기기 + 산문 뒤에 붙은 JSON 건지기는 _extract_json 한 곳에 모았습니다
         # (챗봇에서 실제로 그 두 경우를 다 만났습니다 — 그 함수 주석 참고).
         result = _extract_json(text)
@@ -1173,7 +1285,10 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
         # 패키지 미설치·키 오류·네트워크 장애 어느 쪽이든 보고서는 나가야 한다.
         # 발표 중에 500 을 띄우느니 규칙 기반 초안을 주고 사유를 함께 적는다.
         fb = _fallback_report(req.period, kpi, priorities)
-        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+        if isinstance(e, AIBusy):
+            detail = "지금 AI 요청이 몰려 있습니다. 잠시 후 다시 눌러 주세요"
+        else:
+            detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
         fb["disclaimer"] = f"AI 호출에 실패해 규칙 기반 초안으로 대체했습니다 ({provider}: {detail}). " \
                            + fb["disclaimer"]
         return fb
@@ -1353,56 +1468,93 @@ _CHAT_REPORT_RULES = """당신은 화성시 버스 대시보드의 보고서 편
 draft.sections 는 **고친 전체 목록**입니다(안 고친 섹션도 그대로 포함)."""
 
 
-def _call_ai_chat(provider: str, model: str, system: str, messages: list) -> str:
-    """여러 차례 주고받는 호출. 기존 _call_ai 는 단발이라 그대로 두고 옆에 둡니다
-    (보고서 생성이 계속 씁니다)."""
-    import os
+#  프로바이더별 분기는 _astream_ai 한 곳으로 모았습니다. 예전에는 이 자리에 보고서용
+#  _call_ai 와 거의 같은 코드가 한 벌 더 있었고, Gemini 모델을 추가할 때마다 두 곳을
+#  같이 고쳐야 했습니다.
 
-    if provider == "claude":
-        try:
-            import anthropic
-        except ImportError:
-            raise HTTPException(500, "pip install anthropic")
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise HTTPException(500, "ANTHROPIC_API_KEY 환경변수가 없습니다.")
-        msg = anthropic.Anthropic(api_key=key).messages.create(
-            model=model, max_tokens=AI_MAX_TOKENS, system=system, messages=messages,
-        )
-        # 최신 모델이 ThinkingBlock 을 먼저 보내므로 첫 블록만 보면 터집니다
-        # (_call_ai 의 같은 자리 주석 참고). 텍스트 블록만 골라 잇습니다.
-        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
 
-    if provider == "openai":
-        try:
-            import openai
-        except ImportError:
-            raise HTTPException(500, "pip install openai")
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            raise HTTPException(500, "OPENAI_API_KEY 환경변수가 없습니다.")
-        resp = openai.OpenAI(api_key=key).chat.completions.create(
-            model=model, max_tokens=AI_MAX_TOKENS,
-            messages=[{"role": "system", "content": system}] + messages,
-        )
-        return resp.choices[0].message.content
+# ─── 스트리밍 중인 JSON 에서 reply 만 뽑아내기 ────────────────────────────────
+#
+#  모델은 {"reply": "...", "action": {...}} 형태로 답합니다. 그 원문을 그대로 흘리면
+#  화면에 `{"reply": "안녕하` 가 찍힙니다. 그래서 서버가 조각을 모아 가며 reply 값이
+#  **자란 만큼만** 잘라 내보냅니다. reply 가 첫 키라 사실상 첫 조각부터 흘러갑니다.
+_JSON_ESC = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+             "n": "\n", "r": "\r", "t": "\t"}
+_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*", re.I)
 
-    if provider == "gemini":
-        try:
-            import google.generativeai as genai
-        except ImportError:
-            raise HTTPException(500, "pip install google-generativeai")
-        key = os.environ.get("GOOGLE_API_KEY")
-        if not key:
-            raise HTTPException(500, "GOOGLE_API_KEY 환경변수가 없습니다.")
-        genai.configure(api_key=key)
-        # Gemini 는 system 을 별도 인자로 받고 role 이 user/model 입니다.
-        m = genai.GenerativeModel(model, system_instruction=system)
-        hist = [{"role": ("model" if x["role"] == "assistant" else "user"),
-                 "parts": [x["content"]]} for x in messages]
-        return m.generate_content(hist).text
 
-    raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+class _ReplyExtractor:
+    """조각을 넣으면 새로 드러난 reply 텍스트만 돌려준다."""
+
+    def __init__(self):
+        self.buf = ""
+        self.pos = 0
+        self.body = -1      # reply 문자열 본문이 시작하는 위치
+        self.closed = False
+        self.plain = False  # JSON 이 아니라 산문이 오는 경우
+
+    def feed(self, chunk: str) -> str:
+        self.buf += chunk
+        if self.closed:
+            return ""
+        if self.plain:
+            out, self.pos = self.buf[self.pos:], len(self.buf)
+            return out
+        if self.body < 0:
+            self._locate()
+            if self.body < 0:
+                return ""
+            if self.plain:                       # _locate 가 산문으로 판정한 경우
+                out, self.pos = self.buf[self.pos:], len(self.buf)
+                return out
+
+        out, b, n, i = [], self.buf, len(self.buf), self.pos
+        while i < n:
+            c = b[i]
+            if c == '"':                         # 문자열 끝 — 여기서 멈춘다
+                self.closed = True
+                break
+            if c != "\\":
+                out.append(c)
+                i += 1
+                continue
+            if i + 1 >= n:                       # 이스케이프가 아직 덜 왔다
+                break
+            e = b[i + 1]
+            if e == "u":
+                if i + 6 > n:                    # \uXXXX 네 자리가 아직 덜 왔다
+                    break
+                try:
+                    out.append(chr(int(b[i + 2:i + 6], 16)))
+                except ValueError:
+                    pass
+                i += 6
+            else:
+                out.append(_JSON_ESC.get(e, e))
+                i += 2
+        self.pos = i
+        return "".join(out)
+
+    def _locate(self):
+        k = self.buf.find('"reply"')
+        if k >= 0:
+            j = self.buf.find(":", k + 7)
+            if j < 0:
+                return
+            q = self.buf.find('"', j + 1)
+            if q < 0:
+                return
+            self.body = self.pos = q + 1
+            return
+        # 200자를 봐도 못 찾았고 시작이 { 도 아니면 JSON 이 아니라고 본다.
+        if len(self.buf) >= 200 and not _FENCE_RE.sub("", self.buf).lstrip().startswith("{"):
+            self.plain = True
+            self.body = self.pos = 0
+
+
+def _sse(event: str, data: dict) -> str:
+    """SSE 한 덩어리. json.dumps 가 줄바꿈을 이스케이프하므로 프레임이 깨지지 않는다."""
+    return "event: %s\ndata: %s\n\n" % (event, json.dumps(data, ensure_ascii=False))
 
 
 class ChatRequest(BaseModel):
@@ -1413,6 +1565,7 @@ class ChatRequest(BaseModel):
     draft: Optional[dict] = None     # mode=report 일 때 현재 초안
     provider: str = "auto"
     model: Optional[str] = None
+    stream: bool = False             # true 면 text/event-stream 으로 흘려보낸다
 
 
 def _chat_unavailable(reason: str) -> dict:
@@ -1422,47 +1575,11 @@ def _chat_unavailable(reason: str) -> dict:
     return {"reply": reason, "action": {"type": "none"}, "ok": False}
 
 
-@app.post("/api/v1/chat")
-def chat(req: ChatRequest):
-    _chk_period(req.period)
-    if req.mode not in ("help", "report"):
-        raise HTTPException(400, "mode는 help 또는 report 여야 합니다.")
+_CHAT_BUSY = ("지금 AI 요청이 몰려 있습니다. 잠시 뒤 다시 보내 주세요.")
 
-    msgs = [m for m in req.messages
-            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
-            and isinstance(m.get("content"), str) and m["content"].strip()]
-    msgs = [{"role": m["role"], "content": m["content"][:MAX_CHAT_CHARS]}
-            for m in msgs][-MAX_CHAT_TURNS * 2:]
-    if not msgs or msgs[-1]["role"] != "user":
-        raise HTTPException(400, "마지막 메시지는 user 여야 합니다.")
 
-    provider = _detect_provider() if req.provider == "auto" else req.provider
-    if provider is None:
-        return _chat_unavailable(
-            "AI 키가 설정되어 있지 않아 채팅을 쓸 수 없습니다. .env 에 "
-            "ANTHROPIC_API_KEY · OPENAI_API_KEY · GOOGLE_API_KEY 중 하나를 넣어 주세요."
-        )
-    if provider not in _PROVIDERS:
-        raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
-    model = req.model or _default_model(provider)
-
-    kb = CHAT_KB_PATH.read_text("utf-8") if CHAT_KB_PATH.exists() else ""
-    rules = _CHAT_REPORT_RULES if req.mode == "report" else _CHAT_RULES
-    system = (
-        rules
-        + "\n\n<지식>\n" + kb
-        + "\n\n<사실>\n" + json.dumps(_chat_pack(req.period), ensure_ascii=False)
-        + "\n\n<지금 화면>\n" + json.dumps(req.context, ensure_ascii=False)
-    )
-    if req.mode == "report":
-        system += "\n\n<현재 초안>\n" + json.dumps(req.draft or {}, ensure_ascii=False)
-
-    try:
-        text = (_call_ai_chat(provider, model, system, msgs) or "").strip()
-    except Exception as e:
-        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
-        return _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail}).")
-
+def _chat_result(text: str, provider: str, model: str, mode: str) -> dict:
+    """모델이 낸 원문 → 화면이 쓰는 최종 응답. 스트리밍·비스트리밍이 같이 씁니다."""
     out = _extract_json(text)
     if not isinstance(out, dict) or not isinstance(out.get("reply"), str):
         # 형식은 틀렸어도 사람이 읽을 말은 왔을 수 있으니 통째로 버리지 않습니다.
@@ -1478,6 +1595,112 @@ def chat(req: ChatRequest):
         act = {"type": "none"}
     res = {"reply": out["reply"], "action": act, "ok": True,
            "provider": _PROVIDERS[provider]["label"], "model": model}
-    if req.mode == "report" and isinstance(out.get("draft"), dict):
+    if mode == "report" and isinstance(out.get("draft"), dict):
         res["draft"] = out["draft"]
-    return _json(res)
+    return res
+
+
+def _sse_response(gen) -> StreamingResponse:
+    """SSE 응답 껍데기.
+
+    압축을 두 겹으로 막습니다. 이 앱에는 GZipMiddleware 가 걸려 있고, 조각이 압축
+    버퍼에 고이면 '한 번에 뭉쳐서' 도착해 스트리밍을 붙인 의미가 사라집니다.
+      · 지금 쓰는 Starlette(1.3.1)는 text/event-stream 을 이미 기본 제외합니다
+        (DEFAULT_EXCLUDED_CONTENT_TYPES — 확인함).
+      · 그래도 Content-Encoding 을 직접 박아 둡니다. 같은 응답자가 헤더에
+        content-encoding 이 있으면 무조건 그대로 통과시키므로(IdentityResponder),
+        Starlette 가 낮은 버전이거나 제외 목록이 바뀌어도 안전합니다.
+    """
+    return StreamingResponse(gen, media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "Content-Encoding": "identity",
+        "X-Accel-Buffering": "no",     # 리버스프록시(Caddy·nginx)가 버퍼링하지 않게
+    })
+
+
+async def _sse_once(payload: dict) -> AsyncIterator[str]:
+    yield _sse("done", payload)
+
+
+async def _chat_sse(provider: str, model: str, system: str,
+                    msgs: list, mode: str) -> AsyncIterator[str]:
+    """조각이 오는 대로 reply 를 흘리고, 끝나면 최종 구조를 done 으로 한 번 더 보낸다.
+
+    화면은 delta 로 글자를 채우다가 done 에서 action·draft 를 받습니다. 중간에 끊겨도
+    done 을 못 받은 것으로 판정할 수 있어, 반쪽짜리 답을 완성본으로 오해하지 않습니다.
+    """
+    ex, raw = _ReplyExtractor(), []
+    try:
+        async with _ai_slot():
+            deadline = time.monotonic() + AI_REQUEST_TIMEOUT_S
+            async for piece in _astream_ai(provider, model, system, msgs):
+                raw.append(piece)
+                grown = ex.feed(piece)
+                if grown:
+                    yield _sse("delta", {"text": grown})
+                if time.monotonic() > deadline:
+                    raise asyncio.TimeoutError
+    except AIBusy:
+        yield _sse("done", _chat_unavailable(_CHAT_BUSY))
+        return
+    except asyncio.TimeoutError:
+        yield _sse("done", _chat_unavailable(
+            f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 끝나지 않았습니다."))
+        return
+    except Exception as e:
+        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+        yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail})."))
+        return
+
+    yield _sse("done", _chat_result("".join(raw).strip(), provider, model, mode))
+
+
+@app.post("/api/v1/chat")
+async def chat(req: ChatRequest):
+    _chk_period(req.period)
+    if req.mode not in ("help", "report"):
+        raise HTTPException(400, "mode는 help 또는 report 여야 합니다.")
+
+    msgs = [m for m in req.messages
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str) and m["content"].strip()]
+    msgs = [{"role": m["role"], "content": m["content"][:MAX_CHAT_CHARS]}
+            for m in msgs][-MAX_CHAT_TURNS * 2:]
+    if not msgs or msgs[-1]["role"] != "user":
+        raise HTTPException(400, "마지막 메시지는 user 여야 합니다.")
+
+    provider = _detect_provider() if req.provider == "auto" else req.provider
+    if provider is None:
+        nokey = _chat_unavailable(
+            "AI 키가 설정되어 있지 않아 채팅을 쓸 수 없습니다. .env 에 "
+            "ANTHROPIC_API_KEY · OPENAI_API_KEY · GOOGLE_API_KEY 중 하나를 넣어 주세요."
+        )
+        # 스트리밍을 요청했으면 실패도 같은 형식으로 — 화면의 파서가 갈리지 않게.
+        return _sse_response(_sse_once(nokey)) if req.stream else nokey
+    if provider not in _PROVIDERS:
+        raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
+    model = req.model or _default_model(provider)
+
+    kb = CHAT_KB_PATH.read_text("utf-8") if CHAT_KB_PATH.exists() else ""
+    rules = _CHAT_REPORT_RULES if req.mode == "report" else _CHAT_RULES
+    system = (
+        rules
+        + "\n\n<지식>\n" + kb
+        + "\n\n<사실>\n" + json.dumps(_chat_pack(req.period), ensure_ascii=False)
+        + "\n\n<지금 화면>\n" + json.dumps(req.context, ensure_ascii=False)
+    )
+    if req.mode == "report":
+        system += "\n\n<현재 초안>\n" + json.dumps(req.draft or {}, ensure_ascii=False)
+
+    if req.stream:
+        return _sse_response(_chat_sse(provider, model, system, msgs, req.mode))
+
+    try:
+        text = (await _acall_ai(provider, model, system, msgs) or "").strip()
+    except AIBusy:
+        return _chat_unavailable(_CHAT_BUSY)
+    except Exception as e:
+        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+        return _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail}).")
+
+    return _json(_chat_result(text, provider, model, req.mode))
