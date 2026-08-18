@@ -1109,11 +1109,21 @@ def _ai_client(provider: str):
     elif provider == "gemini":
         try:
             from google import genai as genai_sdk
+            from google.genai import types as genai_types
         except ImportError:
             raise HTTPException(500, "pip install google-genai")
         # google-generativeai(구버전)에서 옮겨왔다 — thinking budget이 그 SDK의
         # GenerationConfig 프로토콜엔 필드 자체가 없었다(실측 확인).
-        client = genai_sdk.Client(api_key=key)
+        #
+        # retry_options 를 안 주면 이 SDK는 기본이 "1번 시도하고 바로 포기"다
+        # (소스 확인: retry_args(None) → stop_after_attempt(1)). 빈 HttpRetryOptions()
+        # 를 주면 SDK 기본 정책이 켜진다 — 408·429·500·502·503·504 에러에 최대 5번,
+        # 1→2→4→8초 지수 백오프. "지금 트래픽이 몰려 일시적으로 과부하" 라는
+        # 503 UNAVAILABLE 이 바로 이 목록에 있다.
+        client = genai_sdk.Client(
+            api_key=key,
+            http_options=genai_types.HttpOptions(retry_options=genai_types.HttpRetryOptions()),
+        )
     else:
         raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
 
