@@ -896,6 +896,7 @@ _PROVIDERS = {
         "default_model": "gemini-3.1-pro-preview",
         "models": [
             {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro",        "tier": "premium"},
+            {"id": "gemini-3.6-flash",        "name": "Gemini 3.6 Flash",      "tier": "standard"},
             {"id": "gemini-3.5-flash",        "name": "Gemini 3.5 Flash",      "tier": "standard"},
             {"id": "gemini-3-flash-preview",  "name": "Gemini 3 Flash",        "tier": "fast"},
             {"id": "gemini-3.1-flash-lite",   "name": "Gemini 3.1 Flash-Lite", "tier": "fast"},
