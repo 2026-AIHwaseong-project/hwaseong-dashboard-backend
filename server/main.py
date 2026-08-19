@@ -870,6 +870,12 @@ def run_recommendations(req: RecRequest):
 
 # ─── 9. POST /api/v1/reports/draft ────────────────────────────────────────────
 
+#  프로바이더 폴백 — 주 프로바이더(보통 gemini) 호출이 실패하면 한 번만 오픈라우터로
+#  넘어간다. OPENROUTER_API_KEY 가 없으면 이 경로는 그냥 비활성(기존처럼 실패 응답).
+#  _PROVIDERS 의 openrouter 항목이 이 값을 참조하므로 그보다 앞에 둔다.
+AI_FALLBACK_PROVIDER = "openrouter"
+AI_FALLBACK_MODEL    = os.environ.get("AI_FALLBACK_MODEL", "anthropic/claude-haiku-4.5")
+
 # 지원 프로바이더 설정
 _PROVIDERS = {
     "claude": {
@@ -904,6 +910,16 @@ _PROVIDERS = {
             {"id": "gemini-3.1-flash-lite",   "name": "Gemini 3.1 Flash-Lite", "tier": "fast"},
         ],
     },
+    # 사용자가 고르는 프로바이더가 아니라 폴백 전용이라 internal=True — get_providers()
+    # 목록(프론트 드롭다운)에서 뺀다. 주 프로바이더(보통 gemini) 호출이 실패했을 때만
+    # _acall_ai/_chat_sse 가 이 항목으로 한 번 더 시도한다.
+    "openrouter": {
+        "env": "OPENROUTER_API_KEY",
+        "label": "OpenRouter (폴백)",
+        "default_model": AI_FALLBACK_MODEL,
+        "models": [{"id": AI_FALLBACK_MODEL, "name": AI_FALLBACK_MODEL, "tier": "fallback"}],
+        "internal": True,
+    },
 }
 
 
@@ -912,6 +928,8 @@ def get_providers():
     """사용 가능한 AI 프로바이더·모델 목록 (프론트 드롭다운용)."""
     result = []
     for name, cfg in _PROVIDERS.items():
+        if cfg.get("internal"):    # 폴백 전용(openrouter) — 사람이 고르는 목록엔 안 낸다
+            continue
         available = bool(os.environ.get(cfg["env"]))
         result.append({
             "id": name,
@@ -1109,20 +1127,26 @@ def _ai_client(provider: str):
     elif provider == "gemini":
         try:
             from google import genai as genai_sdk
-            from google.genai import types as genai_types
         except ImportError:
             raise HTTPException(500, "pip install google-genai")
         # google-generativeai(구버전)에서 옮겨왔다 — thinking budget이 그 SDK의
         # GenerationConfig 프로토콜엔 필드 자체가 없었다(실측 확인).
         #
-        # retry_options 를 안 주면 이 SDK는 기본이 "1번 시도하고 바로 포기"다
-        # (소스 확인: retry_args(None) → stop_after_attempt(1)). 빈 HttpRetryOptions()
-        # 를 주면 SDK 기본 정책이 켜진다 — 408·429·500·502·503·504 에러에 최대 5번,
-        # 1→2→4→8초 지수 백오프. "지금 트래픽이 몰려 일시적으로 과부하" 라는
-        # 503 UNAVAILABLE 이 바로 이 목록에 있다.
-        client = genai_sdk.Client(
-            api_key=key,
-            http_options=genai_types.HttpOptions(retry_options=genai_types.HttpRetryOptions()),
+        # 재시도는 일부러 안 켠다(예전엔 HttpRetryOptions() 로 최대 5번·15초
+        # 백오프를 켰었다 — 45fbe9e). 지금은 실패하면 바로 아래 openrouter 폴백
+        # (_acall_ai/_chat_sse)으로 넘어가는 설계라, 같은 프로바이더에서 재시도로
+        # 버티는 시간이 오히려 폴백 도착만 늦춘다.
+        client = genai_sdk.Client(api_key=key)
+    elif provider == "openrouter":
+        try:
+            import openai
+        except ImportError:
+            raise HTTPException(500, "pip install openai")
+        # 오픈라우터는 OpenAI 호환 API라 openai SDK를 그대로 쓰고 base_url만 바꾼다
+        # — 새 의존성이 필요 없다.
+        client = openai.AsyncOpenAI(
+            api_key=key, base_url="https://openrouter.ai/api/v1",
+            timeout=AI_REQUEST_TIMEOUT_S, max_retries=AI_MAX_RETRIES,
         )
     else:
         raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
@@ -1157,11 +1181,14 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
                 yield chunk
         return
 
-    if provider == "openai":
+    if provider == "openai" or provider == "openrouter":   # 오픈라우터도 같은 OpenAI 호환 API
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
-        stream = await client.chat.completions.create(
-            model=model, max_tokens=max_tokens, messages=msgs, stream=True,
-        )
+        kw = {"model": model, "max_tokens": max_tokens, "messages": msgs, "stream": True}
+        if provider == "openrouter":
+            # reasoning.effort — thinking_budget 의 오픈라우터판(제공사 공통 규격).
+            # 여긴 gemini 직접 호출이 실패했을 때만 오는 비상경로라 낮게 둔다.
+            kw["extra_body"] = {"reasoning": {"effort": "low"}}
+        stream = await client.chat.completions.create(**kw)
         async for ev in stream:
             if not ev.choices:
                 continue
@@ -1192,27 +1219,43 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
 
 
 async def _acall_ai(provider: str, model: str, system: Optional[str],
-                    messages: list, *, max_tokens: int = AI_MAX_TOKENS) -> str:
-    """스트리밍을 다 모아 한 문자열로. 슬롯을 잡고 전체 시간도 제한한다."""
-    async with _ai_slot():
+                    messages: list, *, max_tokens: int = AI_MAX_TOKENS) -> tuple:
+    """스트리밍을 다 모아 한 문자열로. 슬롯을 잡고 전체 시간도 제한한다.
+
+    (text, 실제로 답한 provider, model) 을 돌려준다 — 주 프로바이더가 실패해
+    오픈라우터로 넘어갔으면 화면·보고서에 그 사실이 정확히 찍혀야 하기 때문이다
+    (요청받은 provider 를 그대로 표시하면 "제미나이가 답했다"고 거짓 표시하게 된다).
+    """
+    async def _once(prov: str, mdl: str) -> str:
         parts: list = []
 
         async def _drain():
-            async for piece in _astream_ai(provider, model, system, messages,
-                                           max_tokens=max_tokens):
+            async for piece in _astream_ai(prov, mdl, system, messages, max_tokens=max_tokens):
                 parts.append(piece)
 
+        await asyncio.wait_for(_drain(), AI_REQUEST_TIMEOUT_S)
+        return "".join(parts)
+
+    async with _ai_slot():
         try:
-            await asyncio.wait_for(_drain(), AI_REQUEST_TIMEOUT_S)
+            return (await _once(provider, model), provider, model)
         except asyncio.TimeoutError:
             raise HTTPException(504, f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 오지 않았습니다.")
-        return "".join(parts)
+        except Exception:
+            if provider == AI_FALLBACK_PROVIDER or not os.environ.get("OPENROUTER_API_KEY"):
+                raise
+            try:
+                return (await _once(AI_FALLBACK_PROVIDER, AI_FALLBACK_MODEL),
+                        AI_FALLBACK_PROVIDER, AI_FALLBACK_MODEL)
+            except asyncio.TimeoutError:
+                raise HTTPException(504, f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 오지 않았습니다.")
 
 
 def _call_ai(provider: str, model: str, prompt: str) -> str:
     """동기 진입점 — scripts/test_ai.py 가 이 이름으로 씁니다. 서버는 쓰지 않습니다."""
-    return asyncio.run(_acall_ai(provider, model, None,
-                                 [{"role": "user", "content": prompt}]))
+    text, _, _ = asyncio.run(_acall_ai(provider, model, None,
+                                       [{"role": "user", "content": prompt}]))
+    return text
 
 
 class ReportRequest(BaseModel):
@@ -1301,24 +1344,27 @@ async def draft_report(req: ReportRequest):
 JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 
     try:
-        text = (await _acall_ai(provider, model, None,
-                                [{"role": "user", "content": prompt}])).strip()
+        text, used_provider, used_model = await _acall_ai(
+            provider, model, None, [{"role": "user", "content": prompt}])
+        text = text.strip()
         # 코드펜스 벗기기 + 산문 뒤에 붙은 JSON 건지기는 _extract_json 한 곳에 모았습니다
         # (챗봇에서 실제로 그 두 경우를 다 만났습니다 — 그 함수 주석 참고).
         result = _extract_json(text)
         if not isinstance(result, dict):
             raise json.JSONDecodeError("JSON 객체를 찾지 못했습니다", text[:200], 0)
         result["generatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        result["provider"]    = _PROVIDERS[provider]["label"]
-        result["model"]       = model
+        # 실제로 답한 프로바이더·모델을 표시한다 — 오픈라우터 폴백이 탔으면
+        # 요청받은 provider(gemini)가 아니라 그 사실을 그대로 보여준다.
+        result["provider"]    = _PROVIDERS[used_provider]["label"]
+        result["model"]       = used_model
         return result
     except json.JSONDecodeError as e:
         return {
             "title": "보고서 생성 오류 — JSON 파싱 실패",
             "subtitle": str(e),
             "period": req.period,
-            "provider": _PROVIDERS[provider]["label"],
-            "model": model,
+            "provider": _PROVIDERS[used_provider]["label"],
+            "model": used_model,
             "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "sections": [],
             "tables": [],
@@ -1671,19 +1717,31 @@ async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: st
 
     화면은 delta 로 글자를 채우다가 done 에서 action·draft 를 받습니다. 중간에 끊겨도
     done 을 못 받은 것으로 판정할 수 있어, 반쪽짜리 답을 완성본으로 오해하지 않습니다.
+
+    주 프로바이더가 실패하면 오픈라우터로 한 번 더 시도한다 — 단, **아직 한 글자도
+    화면에 안 나간 경우에만**. 이미 delta 를 몇 조각 보낸 뒤에 끊겼는데 폴백을 처음부터
+    다시 흘리면, 화면엔 두 응답이 이어붙어 뒤섞인 글로 보인다.
     """
     ex, raw = _ReplyExtractor(), []
-    try:
+    started = False
+    used_provider, used_model = provider, model
+
+    async def _run(prov: str, mdl: str):
+        nonlocal started
         async with _ai_slot():
             deadline = time.monotonic() + AI_REQUEST_TIMEOUT_S
-            async for piece in _astream_ai(provider, model, system, msgs,
-                                           max_tokens=max_tokens):
+            async for piece in _astream_ai(prov, mdl, system, msgs, max_tokens=max_tokens):
+                started = True
                 raw.append(piece)
                 grown = ex.feed(piece)
                 if grown:
                     yield _sse("delta", {"text": grown})
                 if time.monotonic() > deadline:
                     raise asyncio.TimeoutError
+
+    try:
+        async for evt in _run(provider, model):
+            yield evt
     except AIBusy:
         yield _sse("done", _chat_unavailable(_CHAT_BUSY))
         return
@@ -1692,11 +1750,21 @@ async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: st
             f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 끝나지 않았습니다."))
         return
     except Exception as e:
-        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
-        yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail})."))
-        return
+        no_fallback = started or provider == AI_FALLBACK_PROVIDER or not os.environ.get("OPENROUTER_API_KEY")
+        if no_fallback:
+            detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+            yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail})."))
+            return
+        used_provider, used_model = AI_FALLBACK_PROVIDER, AI_FALLBACK_MODEL
+        try:
+            async for evt in _run(used_provider, used_model):
+                yield evt
+        except Exception as e2:
+            detail = e2.detail if isinstance(e2, HTTPException) else f"{type(e2).__name__}: {e2}"
+            yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({used_provider}: {detail})."))
+            return
 
-    yield _sse("done", _chat_result("".join(raw).strip(), provider, model, mode))
+    yield _sse("done", _chat_result("".join(raw).strip(), used_provider, used_model, mode))
 
 
 @app.post("/api/v1/chat")
@@ -1746,12 +1814,13 @@ async def chat(req: ChatRequest):
                                        max_tokens=max_tokens))
 
     try:
-        text = (await _acall_ai(provider, model, system, msgs,
-                                max_tokens=max_tokens) or "").strip()
+        text, used_provider, used_model = await _acall_ai(provider, model, system, msgs,
+                                                           max_tokens=max_tokens)
+        text = (text or "").strip()
     except AIBusy:
         return _chat_unavailable(_CHAT_BUSY)
     except Exception as e:
         detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
         return _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail}).")
 
-    return _json(_chat_result(text, provider, model, req.mode))
+    return _json(_chat_result(text, used_provider, used_model, req.mode))
