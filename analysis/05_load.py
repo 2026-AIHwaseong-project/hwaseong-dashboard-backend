@@ -38,6 +38,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import od_curve                                    # noqa: E402  (경로 삽입 후)
+import params as _params                              # noqa: E402  (상수 정본)
 
 ROOT = Path(__file__).resolve().parent.parent
 D_DIR = ROOT / "dataset_hwaseong"
@@ -46,16 +47,10 @@ STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 PERIODS = ["am", "day", "pm", "night"]
 
-# 일 버스통행 환산 — 인구 × (전수단 원단위 2.5 × 버스분담률 0.10).
-#
-# 목업의 TRIP_COEF=3200 은 정규화값(0~1)에 곱하는 임의 계수라 실데이터 근거가 없다.
-# 그대로 쓰면 사각지대 잠재수요가 104만 통행/일이 나오는데, 화성시 실제 버스 승차가
-# 일 169,026 이라 6.2배다. "사각지대 하나가 시 전체 이용의 6배"는 발표에서 못 버틴다.
-# 인구 기준으로 바꾸면 잠재/실현 = 2.18배로 억압수요가 설명 가능한 범위에 들어온다.
-# ⚠️ 두 계수 모두 가정값이다. meta.assumptions 에 confirmed:false 로 실어 보낸다.
-TRIP_RATE, BUS_SHARE = 2.5, 0.10
-BUS_TRIP_RATE = TRIP_RATE * BUS_SHARE
-MI_THRESHOLDS = [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2]
+# 상수 정본은 params.py (관리자 오버라이드 반영 포함). 계수 근거 주석도 그쪽에.
+TRIP_RATE, BUS_SHARE = _params.TRIP_RATE, _params.BUS_SHARE
+BUS_TRIP_RATE = _params.BUS_TRIP_RATE
+MI_THRESHOLDS = _params.MI_THRESHOLDS
 TODAY = str(date.today())
 HOURS_LIST = list(range(5, 24))  # [5, 6, ..., 23]
 
@@ -706,6 +701,7 @@ boarding_match_rate = round(match_count / len(stop_ars_set), 3) if stop_ars_set 
 meta = {
     "region":    "화성시",
     "updatedAt": TODAY,
+    "paramsVersion": _params.params_version(),
     "isMockData": False,
     "periods": [
         {"id": "am",    "name": "출근", "label": "07–09", "hours": [7, 9]},
@@ -740,26 +736,15 @@ meta = {
         "regions":        regions,
         "scaleBar":       {"km": 5},
     },
+    # 단가·예산 정본은 params.py — 서버 COST_KRW 와 여기가 같은 근원을 읽는다.
     "cost": {
-        "stop": {
-            "krw":      42000000,
-            "basis":    "capital",
-            "lifeYears": 10,
-            "annualKrw": 4200000,
-        },
-        "drt": {
-            "krw":      180000000,
-            "basis":    "operating",
-            "lifeYears": 1,
-            "annualKrw": 180000000,
-        },
-        "freq": {
-            "krw":      95000000,
-            "basis":    "operating",
-            "lifeYears": 1,
-            "annualKrw": 95000000,
-        },
-        "defaultBudget": 3000000000,
+        **{t: {
+            "krw":       _params.COST_TOTAL[t],
+            "basis":     _params.COST_META[t]["basis"],
+            "lifeYears": _params.COST_META[t]["lifeYears"],
+            "annualKrw": round(_params.COST_TOTAL[t] / _params.COST_META[t]["lifeYears"]),
+        } for t in ("stop", "drt", "freq")},
+        "defaultBudget": _params.DEFAULT_BUDGET,
     },
     # 어느 수치가 실측이고 어느 수치가 추정인지.
     #
@@ -799,10 +784,12 @@ meta = {
     "assumptions": {
         "busTripRate": {
             "value": BUS_TRIP_RATE, "confirmed": False,
+            "overridden": bool(_params.OVERRIDDEN.get("busTripRate")),
             "note": f"1인 1일 버스통행 = 전수단 원단위 {TRIP_RATE} × 버스분담률 {BUS_SHARE}",
         },
         "minFreqPerHour": {
-            "value": 2.0, "confirmed": False,
+            "value": _params.MIN_FREQ_PER_H, "confirmed": False,
+            "overridden": bool(_params.OVERRIDDEN.get("minFreqPerHour")),
             "note": "적정·공급과잉 판정의 절대 하한. 야간 상대평가 오라벨 방지",
         },
     },
@@ -810,47 +797,31 @@ meta = {
         "demand":               "0.5·norm_board + 0.5·norm_potential",
         "supply":               "0.78·norm_freq + 0.22·coverage",
         "mi":                   "(zD − zS) · (D/dRef)^0.65",
-        "dampExp":              0.65,
-        "wFreq":                0.78,
-        "wCov":                 0.22,
-        "eldCoef":              1.6,
-        "coverageThresholdM":   600,
-        "needMiThreshold":      0.75,
+        "dampExp":              _params.DAMP_EXP,
+        "wFreq":                _params.W_FREQ,
+        "wCov":                 _params.W_COV,
+        "eldCoef":              _params.ELD_COEF,
+        "coverageThresholdM":   int(_params.COV_THRESHOLD_M),
+        "needMiThreshold":      _params.QUAD["need_mi"],
     },
     "effects": [
+        # radiusKm 는 시뮬 엔진의 계산 반경(R_FINAL)에서 파생한다. 예전에는
+        # 표시가 stop 2.0km 로 계산 800m 와 2.5배 어긋나 있었다 — 화면 문구가
+        # 사용자가 얻는 유일한 파급 범위 정보라 정직하게 맞춘다.
         {
-            "type":          "stop",
-            "label":         "정류장 신설",
-            "icon":          "●",
-            "radiusKm":      2.0,
-            "unitKrw":       42000000,
-            "annualKrw":     4200000,
-            "basis":         "capital",
-            "lifeYears":     10,
-            "coverageRange": [0.15, 0.50],
-        },
-        {
-            "type":          "drt",
-            "label":         "똑버스 배치",
-            "icon":          "◆",
-            "radiusKm":      3.0,
-            "unitKrw":       180000000,
-            "annualKrw":     180000000,
-            "basis":         "operating",
-            "lifeYears":     1,
-            "coverageRange": [0, 0.15],
-        },
-        {
-            "type":          "freq",
-            "label":         "배차 증편",
-            "icon":          "▲",
-            "radiusKm":      2.4,
-            "unitKrw":       95000000,
-            "annualKrw":     95000000,
-            "basis":         "operating",
-            "lifeYears":     1,
-            "coverageRange": [0.50, 1.0],
-        },
+            "type":          t,
+            "label":         lab,
+            "icon":          ic,
+            "radiusKm":      _params.radius_km(t),
+            "unitKrw":       _params.COST_TOTAL[t],
+            "annualKrw":     round(_params.COST_TOTAL[t] / _params.COST_META[t]["lifeYears"]),
+            "basis":         _params.COST_META[t]["basis"],
+            "lifeYears":     _params.COST_META[t]["lifeYears"],
+            "coverageRange": _params.COVERAGE_RANGE[t],
+        }
+        for t, lab, ic in (("stop", "정류장 신설", "●"),
+                           ("drt", "똑버스 배치", "◆"),
+                           ("freq", "배차 증편", "▲"))
     ],
 }
 

@@ -64,8 +64,11 @@ QUAD_LABEL = {
 }
 ACTION_LABEL = {"NEW_STOP": "신설", "ADD_FREQ": "증차", "DRT": "똑버스"}
 TYPE_LABEL = {"stop": "정류장 신설", "drt": "똑버스 배치", "freq": "배차 증편"}
-COST_KRW = {"stop": 42_000_000, "drt": 180_000_000, "freq": 95_000_000}
-RADIUS_KM = {"stop": 2.0, "drt": 3.0, "freq": 2.4}
+# 단가·반경 정본은 analysis/params.py (admin.PARAMS 로 1회 로드).
+# RADIUS_KM 은 시뮬 계산 반경 R_FINAL 의 km 파생 — 예전에는 표시 2.0km 대
+# 계산 800m 로 2.5배 어긋나 있었다.
+COST_KRW = dict(admin.PARAMS.COST_TOTAL)
+RADIUS_KM = {t: admin.PARAMS.radius_km(t) for t in ("stop", "drt", "freq")}
 STRAT_META = {
     "efficiency": {"label": "효율 최우선", "note": "사업비 1원당 해소 통행량이 가장 큰 순서로 고릅니다."},
     "equity":     {"label": "교통약자 우선", "note": "고령 잠재통행량 기준으로 개선 효과를 측정합니다."},
