@@ -40,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db
+from . import admin
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -85,24 +86,46 @@ def _load_json() -> dict:
     return src
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def _build_data_snapshot() -> dict:
+    """디스크/DB → 완성된 DATA 스냅샷 한 벌.
+
+    lifespan 과 관리자 재적재(/api/v1/admin/refresh)가 같은 절차를 쓰도록 함수로
+    뽑았다. 시뮬 엔진은 매번 **새 모듈 객체**로 exec 한다 — importlib.reload() 는
+    스레드풀에서 진행 중인 /simulations 가 절반만 갱신된 모듈 전역을 볼 수 있어
+    쓰지 않는다(구 모듈은 진행 중 요청의 참조가 끊기면 GC 된다).
+    exec 중 기준선 assert 가 실패하면 여기서 예외가 나고, 호출자는 기존 DATA 를
+    건드리지 않았으므로 서빙은 이전 상태로 계속된다.
+    """
     # DATABASE_URL 이 있으면 DB(v_* 뷰)에서, 없거나 실패하면 JSON 에서 읽습니다.
     # 둘은 같은 것을 돌려줘야 합니다 — 확인은 python analysis/06_verify_db.py.
     # 아래 어느 쪽으로 왔든 DATA 의 모양이 같으므로 엔드포인트·시뮬레이션 엔진은
     # 자기가 무엇을 읽고 있는지 알 필요가 없습니다.
     src = db.load_all(QUAD_LABEL, ACTION_LABEL)
+    from_db = src is not None
     if src is None:
         src = _load_json()
         print("[server] 계약 JSON 에서 로드", flush=True)
-    DATA.update(src)
-    DATA["cells"] = {p: {c["id"]: c for c in DATA[f"grid_{p}"]["cells"]} for p in PERIODS}
+    src["cells"] = {p: {c["id"]: c for c in src[f"grid_{p}"]["cells"]} for p in PERIODS}
 
-    spec = importlib.util.spec_from_file_location("hw_sim", ROOT / "analysis" / "05_simulate.py")
+    spec = importlib.util.spec_from_file_location(
+        f"hw_sim_{int(time.time() * 1000)}", ROOT / "analysis" / "05_simulate.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    DATA["sim"] = m
+    src["sim"] = m
+    src["_source"] = "db" if from_db else "json"
+    src["_loadedAt"] = datetime.now().isoformat(timespec="seconds")
+    return src
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    DATA.update(_build_data_snapshot())
     print("[server] 시뮬레이션 엔진 로드 완료", flush=True)
+    # 관리자 오버라이드 주입 — 반드시 스냅샷 적재 "직후". admin.apply_runtime_params 는
+    # COST_KRW·sim 모듈 속성·meta 를 한 번에 갱신한다 (server/admin.py 참고).
+    admin.init(DATA=DATA, COST_KRW=COST_KRW, PERIODS=PERIODS,
+               build_snapshot=_build_data_snapshot)
+    admin.apply_runtime_params()
     yield
 
 
@@ -134,6 +157,9 @@ app.add_middleware(
 # 시뮬레이션 응답(cellsByPeriod)이 1.5MB — JSON 이라 8~10배 압축됩니다.
 # 격자를 500m 로 세분화하면 4배가 더 커지므로 압축이 사실상 필수입니다.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# 관리자 콘솔 — ADMIN_TOKEN 미설정이면 전 라우트가 503 (기본 비활성).
+app.include_router(admin.router)
 
 # 프론트 폴백: fetch("/api/v1/…").catch(() => fetch("/data/grid_am.json"))
 #
@@ -463,7 +489,9 @@ def get_stop_profile(stop_id: str):
 class SimRequest(BaseModel):
     name: str = "시나리오"
     period: str = "am"
-    budgetKrw: int = 3_000_000_000
+    # None 이면 관리자 파라미터(cost.defaultBudget)로 보충한다 — 여기 리터럴을 두면
+    # 관리자가 기본 예산을 바꿔도 이 사본만 옛값으로 남는다.
+    budgetKrw: Optional[int] = None
     placements: list = []
 
 
@@ -503,6 +531,8 @@ def _validate_placements(sim, placements: list) -> list:
 @app.post("/api/v1/simulations")
 def run_simulation(req: SimRequest):
     _chk_period(req.period)
+    if req.budgetKrw is None:
+        req.budgetKrw = admin.effective("cost.defaultBudget")
     sim   = DATA["sim"]
     placements = _validate_placements(sim, req.placements)
     state = _apply_cumulative(sim, placements)
@@ -513,8 +543,9 @@ def run_simulation(req: SimRequest):
 class RecRequest(BaseModel):
     strategy: str = "efficiency"
     period: str = "am"
-    budgetKrw: int = 3_000_000_000
-    maxPlacements: int = 10
+    # None 이면 관리자 파라미터로 보충 (SimRequest.budgetKrw 와 같은 이유)
+    budgetKrw: Optional[int] = None
+    maxPlacements: Optional[int] = None
     allowedTypes: list = ["stop", "drt", "freq"]
     region: Optional[str] = None
     cellIds: Optional[list] = None   # 임의 영역(지도 드래그) — 후보를 이 격자로 제한
@@ -719,6 +750,10 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
 @app.post("/api/v1/recommendations")
 def run_recommendations(req: RecRequest):
     _chk_period(req.period)
+    if req.budgetKrw is None:
+        req.budgetKrw = admin.effective("cost.defaultBudget")
+    if req.maxPlacements is None:
+        req.maxPlacements = admin.effective("rec.maxPlacements")
     if req.strategy not in STRAT_META:
         raise HTTPException(400, f"strategy는 {list(STRAT_META)} 중 하나여야 합니다.")
     bad = [t for t in req.allowedTypes if t not in COST_KRW]
@@ -870,6 +905,12 @@ def run_recommendations(req: RecRequest):
 
 # ─── 9. POST /api/v1/reports/draft ────────────────────────────────────────────
 
+#  프로바이더 폴백 — 주 프로바이더(보통 gemini) 호출이 실패하면 한 번만 오픈라우터로
+#  넘어간다. OPENROUTER_API_KEY 가 없으면 이 경로는 그냥 비활성(기존처럼 실패 응답).
+#  _PROVIDERS 의 openrouter 항목이 이 값을 참조하므로 그보다 앞에 둔다.
+AI_FALLBACK_PROVIDER = "openrouter"
+AI_FALLBACK_MODEL    = os.environ.get("AI_FALLBACK_MODEL", "anthropic/claude-haiku-4.5")
+
 # 지원 프로바이더 설정
 _PROVIDERS = {
     "claude": {
@@ -904,6 +945,16 @@ _PROVIDERS = {
             {"id": "gemini-3.1-flash-lite",   "name": "Gemini 3.1 Flash-Lite", "tier": "fast"},
         ],
     },
+    # 사용자가 고르는 프로바이더가 아니라 폴백 전용이라 internal=True — get_providers()
+    # 목록(프론트 드롭다운)에서 뺀다. 주 프로바이더(보통 gemini) 호출이 실패했을 때만
+    # _acall_ai/_chat_sse 가 이 항목으로 한 번 더 시도한다.
+    "openrouter": {
+        "env": "OPENROUTER_API_KEY",
+        "label": "OpenRouter (폴백)",
+        "default_model": AI_FALLBACK_MODEL,
+        "models": [{"id": AI_FALLBACK_MODEL, "name": AI_FALLBACK_MODEL, "tier": "fallback"}],
+        "internal": True,
+    },
 }
 
 
@@ -912,6 +963,8 @@ def get_providers():
     """사용 가능한 AI 프로바이더·모델 목록 (프론트 드롭다운용)."""
     result = []
     for name, cfg in _PROVIDERS.items():
+        if cfg.get("internal"):    # 폴백 전용(openrouter) — 사람이 고르는 목록엔 안 낸다
+            continue
         available = bool(os.environ.get(cfg["env"]))
         result.append({
             "id": name,
@@ -1024,6 +1077,31 @@ AI_QUEUE_TIMEOUT_S   = float(os.environ.get("AI_QUEUE_TIMEOUT_S", "25"))
 AI_REQUEST_TIMEOUT_S = float(os.environ.get("AI_REQUEST_TIMEOUT_S", "120"))
 AI_MAX_RETRIES       = int(os.environ.get("AI_MAX_RETRIES", "2"))
 
+# ─── 속도 — thinking budget · 챗봇 토큰 상한 ──────────────────────────────
+#
+#  실측(2026-08): 같은 질문 두 문장 답에 9~44초가 걸렸는데, 그중 39초 이상이
+#  "생각"이었고 실제 글자가 나오는 건 마지막 0.1초 안쪽이었다(스트리밍이 안 도와줌).
+#  Gemini 는 thinking_budget=0 도 thinking_level="off" 도 이 모델에서 거부한다
+#  (400) — 완전히 끄는 건 안 되고 낮추는 것만 된다. 128 은 실측으로 통과했다.
+#  같은 값도 실행마다 편차가 커서(9초~44초) 이 값이 "항상 빠르게"를 보장하진
+#  않는다 — 최악을 낮추는 것이지 편차 자체를 없애는 게 아니다.
+#
+#  컨텍스트 캐싱(cached_content)도 실측했지만 뺐다 — Gemini API가 `cached_content`
+#  와 `system_instruction`을 같이 못 받는 제약이 있어(400) 프롬프트 조립을 통째로
+#  갈라야 했고, 그 갈라진 구조에서 report 모드가 max_tokens 캡과 얽혀 실제로
+#  깨졌다(6섹션 초안 수정이 잘림). 속도 이득도 편차 폭 안에 묻혀 확실치 않았다 —
+#  복잡도만 늘고 이득은 불확실해서 걷어냈다.
+AI_THINKING_BUDGET = int(os.environ.get("AI_THINKING_BUDGET", "256"))
+
+#  챗봇 답은 _CHAT_RULES 가 3~5문장으로 못박아 둔다. AI_MAX_TOKENS(8192)는
+#  보고서용 — 6개 섹션짜리라 그대로 둔다. 챗봇 help 모드에만 낮은 상한을 따로 둔다
+#  (report 모드는 안 고친 섹션까지 포함해 draft.sections 전체를 되돌려줘야 해서
+#  낮은 캡을 쓰면 잘린다 — chat() 참고).
+#  1024로 실측했을 때 목록형 답이 1011자까지 나온 사례가 있어(문장은 안 잘렸지만
+#  여유가 크지 않았다) 2048로 올렸다 — 보통 답은 수백 자라 흔한 경우엔 비용·속도
+#  차이가 없고, 꼬리 쪽(긴 목록 답)에서 잘릴 위험만 줄인다.
+AI_CHAT_MAX_TOKENS = int(os.environ.get("AI_CHAT_MAX_TOKENS", "2048"))
+
 _ai_sem: Optional[asyncio.Semaphore] = None
 _ai_clients: dict = {}
 
@@ -1083,11 +1161,28 @@ def _ai_client(provider: str):
         )
     elif provider == "gemini":
         try:
-            import google.generativeai as genai
+            from google import genai as genai_sdk
         except ImportError:
-            raise HTTPException(500, "pip install google-generativeai")
-        genai.configure(api_key=key)   # 이 SDK 는 키가 모듈 전역이라 한 번만 건다
-        client = genai
+            raise HTTPException(500, "pip install google-genai")
+        # google-generativeai(구버전)에서 옮겨왔다 — thinking budget이 그 SDK의
+        # GenerationConfig 프로토콜엔 필드 자체가 없었다(실측 확인).
+        #
+        # 재시도는 일부러 안 켠다(예전엔 HttpRetryOptions() 로 최대 5번·15초
+        # 백오프를 켰었다 — 45fbe9e). 지금은 실패하면 바로 아래 openrouter 폴백
+        # (_acall_ai/_chat_sse)으로 넘어가는 설계라, 같은 프로바이더에서 재시도로
+        # 버티는 시간이 오히려 폴백 도착만 늦춘다.
+        client = genai_sdk.Client(api_key=key)
+    elif provider == "openrouter":
+        try:
+            import openai
+        except ImportError:
+            raise HTTPException(500, "pip install openai")
+        # 오픈라우터는 OpenAI 호환 API라 openai SDK를 그대로 쓰고 base_url만 바꾼다
+        # — 새 의존성이 필요 없다.
+        client = openai.AsyncOpenAI(
+            api_key=key, base_url="https://openrouter.ai/api/v1",
+            timeout=AI_REQUEST_TIMEOUT_S, max_retries=AI_MAX_RETRIES,
+        )
     else:
         raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
 
@@ -1096,7 +1191,7 @@ def _ai_client(provider: str):
 
 
 async def _astream_ai(provider: str, model: str, system: Optional[str],
-                      messages: list) -> AsyncIterator[str]:
+                      messages: list, *, max_tokens: int = AI_MAX_TOKENS) -> AsyncIterator[str]:
     """프로바이더 3종을 한 입구로 모은 스트리밍 호출. 텍스트 조각을 순서대로 낸다.
 
     보고서 생성(단발)과 챗봇(여러 차례)이 예전에는 `_call_ai` / `_call_ai_chat` 두
@@ -1111,7 +1206,7 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
     client = _ai_client(provider)
 
     if provider == "claude":
-        kw = {"model": model, "max_tokens": AI_MAX_TOKENS, "messages": messages}
+        kw = {"model": model, "max_tokens": max_tokens, "messages": messages}
         if system:
             kw["system"] = system
         async with client.messages.stream(**kw) as stream:
@@ -1121,11 +1216,14 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
                 yield chunk
         return
 
-    if provider == "openai":
+    if provider == "openai" or provider == "openrouter":   # 오픈라우터도 같은 OpenAI 호환 API
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
-        stream = await client.chat.completions.create(
-            model=model, max_tokens=AI_MAX_TOKENS, messages=msgs, stream=True,
-        )
+        kw = {"model": model, "max_tokens": max_tokens, "messages": msgs, "stream": True}
+        if provider == "openrouter":
+            # reasoning.effort — thinking_budget 의 오픈라우터판(제공사 공통 규격).
+            # 여긴 gemini 직접 호출이 실패했을 때만 오는 비상경로라 낮게 둔다.
+            kw["extra_body"] = {"reasoning": {"effort": "low"}}
+        stream = await client.chat.completions.create(**kw)
         async for ev in stream:
             if not ev.choices:
                 continue
@@ -1135,41 +1233,64 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
         return
 
     if provider == "gemini":
-        # Gemini 는 system 을 별도 인자로 받고 role 이 user/model 입니다.
-        m = client.GenerativeModel(model, system_instruction=system or None)
-        hist = [{"role": ("model" if x["role"] == "assistant" else "user"),
-                 "parts": [x["content"]]} for x in messages]
-        resp = await m.generate_content_async(hist, stream=True)
-        async for ev in resp:
-            piece = getattr(ev, "text", None)
-            if piece:
-                yield piece
+        from google.genai import types as gtypes
+
+        contents = [gtypes.Content(role=("model" if x["role"] == "assistant" else "user"),
+                                    parts=[gtypes.Part(text=x["content"])])
+                    for x in messages]
+        cfg = gtypes.GenerateContentConfig(
+            system_instruction=system or None, max_output_tokens=max_tokens,
+            thinking_config=gtypes.ThinkingConfig(thinking_budget=AI_THINKING_BUDGET),
+        )
+        stream = await client.aio.models.generate_content_stream(
+            model=model, contents=contents, config=cfg,
+        )
+        async for ev in stream:
+            if ev.text:
+                yield ev.text
         return
 
     raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
 
 
 async def _acall_ai(provider: str, model: str, system: Optional[str],
-                    messages: list) -> str:
-    """스트리밍을 다 모아 한 문자열로. 슬롯을 잡고 전체 시간도 제한한다."""
-    async with _ai_slot():
+                    messages: list, *, max_tokens: int = AI_MAX_TOKENS) -> tuple:
+    """스트리밍을 다 모아 한 문자열로. 슬롯을 잡고 전체 시간도 제한한다.
+
+    (text, 실제로 답한 provider, model) 을 돌려준다 — 주 프로바이더가 실패해
+    오픈라우터로 넘어갔으면 화면·보고서에 그 사실이 정확히 찍혀야 하기 때문이다
+    (요청받은 provider 를 그대로 표시하면 "제미나이가 답했다"고 거짓 표시하게 된다).
+    """
+    async def _once(prov: str, mdl: str) -> str:
         parts: list = []
 
         async def _drain():
-            async for piece in _astream_ai(provider, model, system, messages):
+            async for piece in _astream_ai(prov, mdl, system, messages, max_tokens=max_tokens):
                 parts.append(piece)
 
+        await asyncio.wait_for(_drain(), AI_REQUEST_TIMEOUT_S)
+        return "".join(parts)
+
+    async with _ai_slot():
         try:
-            await asyncio.wait_for(_drain(), AI_REQUEST_TIMEOUT_S)
+            return (await _once(provider, model), provider, model)
         except asyncio.TimeoutError:
             raise HTTPException(504, f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 오지 않았습니다.")
-        return "".join(parts)
+        except Exception:
+            if provider == AI_FALLBACK_PROVIDER or not os.environ.get("OPENROUTER_API_KEY"):
+                raise
+            try:
+                return (await _once(AI_FALLBACK_PROVIDER, AI_FALLBACK_MODEL),
+                        AI_FALLBACK_PROVIDER, AI_FALLBACK_MODEL)
+            except asyncio.TimeoutError:
+                raise HTTPException(504, f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 오지 않았습니다.")
 
 
 def _call_ai(provider: str, model: str, prompt: str) -> str:
     """동기 진입점 — scripts/test_ai.py 가 이 이름으로 씁니다. 서버는 쓰지 않습니다."""
-    return asyncio.run(_acall_ai(provider, model, None,
-                                 [{"role": "user", "content": prompt}]))
+    text, _, _ = asyncio.run(_acall_ai(provider, model, None,
+                                       [{"role": "user", "content": prompt}]))
+    return text
 
 
 class ReportRequest(BaseModel):
@@ -1258,24 +1379,27 @@ async def draft_report(req: ReportRequest):
 JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 
     try:
-        text = (await _acall_ai(provider, model, None,
-                                [{"role": "user", "content": prompt}])).strip()
+        text, used_provider, used_model = await _acall_ai(
+            provider, model, None, [{"role": "user", "content": prompt}])
+        text = text.strip()
         # 코드펜스 벗기기 + 산문 뒤에 붙은 JSON 건지기는 _extract_json 한 곳에 모았습니다
         # (챗봇에서 실제로 그 두 경우를 다 만났습니다 — 그 함수 주석 참고).
         result = _extract_json(text)
         if not isinstance(result, dict):
             raise json.JSONDecodeError("JSON 객체를 찾지 못했습니다", text[:200], 0)
         result["generatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        result["provider"]    = _PROVIDERS[provider]["label"]
-        result["model"]       = model
+        # 실제로 답한 프로바이더·모델을 표시한다 — 오픈라우터 폴백이 탔으면
+        # 요청받은 provider(gemini)가 아니라 그 사실을 그대로 보여준다.
+        result["provider"]    = _PROVIDERS[used_provider]["label"]
+        result["model"]       = used_model
         return result
     except json.JSONDecodeError as e:
         return {
             "title": "보고서 생성 오류 — JSON 파싱 실패",
             "subtitle": str(e),
             "period": req.period,
-            "provider": _PROVIDERS[provider]["label"],
-            "model": model,
+            "provider": _PROVIDERS[used_provider]["label"],
+            "model": used_model,
             "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "sections": [],
             "tables": [],
@@ -1622,24 +1746,37 @@ async def _sse_once(payload: dict) -> AsyncIterator[str]:
     yield _sse("done", payload)
 
 
-async def _chat_sse(provider: str, model: str, system: str,
-                    msgs: list, mode: str) -> AsyncIterator[str]:
+async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: str,
+                    *, max_tokens: int = AI_MAX_TOKENS) -> AsyncIterator[str]:
     """조각이 오는 대로 reply 를 흘리고, 끝나면 최종 구조를 done 으로 한 번 더 보낸다.
 
     화면은 delta 로 글자를 채우다가 done 에서 action·draft 를 받습니다. 중간에 끊겨도
     done 을 못 받은 것으로 판정할 수 있어, 반쪽짜리 답을 완성본으로 오해하지 않습니다.
+
+    주 프로바이더가 실패하면 오픈라우터로 한 번 더 시도한다 — 단, **아직 한 글자도
+    화면에 안 나간 경우에만**. 이미 delta 를 몇 조각 보낸 뒤에 끊겼는데 폴백을 처음부터
+    다시 흘리면, 화면엔 두 응답이 이어붙어 뒤섞인 글로 보인다.
     """
     ex, raw = _ReplyExtractor(), []
-    try:
+    started = False
+    used_provider, used_model = provider, model
+
+    async def _run(prov: str, mdl: str):
+        nonlocal started
         async with _ai_slot():
             deadline = time.monotonic() + AI_REQUEST_TIMEOUT_S
-            async for piece in _astream_ai(provider, model, system, msgs):
+            async for piece in _astream_ai(prov, mdl, system, msgs, max_tokens=max_tokens):
+                started = True
                 raw.append(piece)
                 grown = ex.feed(piece)
                 if grown:
                     yield _sse("delta", {"text": grown})
                 if time.monotonic() > deadline:
                     raise asyncio.TimeoutError
+
+    try:
+        async for evt in _run(provider, model):
+            yield evt
     except AIBusy:
         yield _sse("done", _chat_unavailable(_CHAT_BUSY))
         return
@@ -1648,11 +1785,21 @@ async def _chat_sse(provider: str, model: str, system: str,
             f"AI 응답이 {AI_REQUEST_TIMEOUT_S:g}초 안에 끝나지 않았습니다."))
         return
     except Exception as e:
-        detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
-        yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail})."))
-        return
+        no_fallback = started or provider == AI_FALLBACK_PROVIDER or not os.environ.get("OPENROUTER_API_KEY")
+        if no_fallback:
+            detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
+            yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail})."))
+            return
+        used_provider, used_model = AI_FALLBACK_PROVIDER, AI_FALLBACK_MODEL
+        try:
+            async for evt in _run(used_provider, used_model):
+                yield evt
+        except Exception as e2:
+            detail = e2.detail if isinstance(e2, HTTPException) else f"{type(e2).__name__}: {e2}"
+            yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({used_provider}: {detail})."))
+            return
 
-    yield _sse("done", _chat_result("".join(raw).strip(), provider, model, mode))
+    yield _sse("done", _chat_result("".join(raw).strip(), used_provider, used_model, mode))
 
 
 @app.post("/api/v1/chat")
@@ -1692,15 +1839,23 @@ async def chat(req: ChatRequest):
     if req.mode == "report":
         system += "\n\n<현재 초안>\n" + json.dumps(req.draft or {}, ensure_ascii=False)
 
+    # report 모드는 안 고친 섹션까지 포함해 draft.sections 전체를 되돌려줘야 한다
+    # (_CHAT_REPORT_RULES) — 6개 섹션짜리 초안이면 1024로는 잘린다(실측: 57초 걸리고
+    # JSON 파싱 실패로 떨어짐). 낮은 캡은 짧은 대화형 답만 오는 help 모드에만 쓴다.
+    max_tokens = AI_CHAT_MAX_TOKENS if req.mode == "help" else AI_MAX_TOKENS
+
     if req.stream:
-        return _sse_response(_chat_sse(provider, model, system, msgs, req.mode))
+        return _sse_response(_chat_sse(provider, model, system, msgs, req.mode,
+                                       max_tokens=max_tokens))
 
     try:
-        text = (await _acall_ai(provider, model, system, msgs) or "").strip()
+        text, used_provider, used_model = await _acall_ai(provider, model, system, msgs,
+                                                           max_tokens=max_tokens)
+        text = (text or "").strip()
     except AIBusy:
         return _chat_unavailable(_CHAT_BUSY)
     except Exception as e:
         detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
         return _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail}).")
 
-    return _json(_chat_result(text, provider, model, req.mode))
+    return _json(_chat_result(text, used_provider, used_model, req.mode))

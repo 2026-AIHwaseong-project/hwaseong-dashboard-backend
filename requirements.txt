@@ -28,7 +28,9 @@ anthropic>=0.45
 # OPENAI_API_KEY     → gpt-5.6-sol
 openai>=1.55
 # GOOGLE_API_KEY     → gemini-3.1-pro-preview
-google-generativeai>=0.8
+# google-generativeai(구버전)는 여기서 뺐다 — thinking budget 필드가 프로토콜에
+# 아예 없어 새 SDK로 옮겼다(실측 확인, main.py _ai_client 주석 참고).
+google-genai>=2.18
 
 # ── PostgreSQL (선택) ────────────────────────────────────────────
 # 없어도 서버는 계약 JSON 으로 완전히 동작합니다. 관리자 수정 기능을 켤 때만 필요.
