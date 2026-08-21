@@ -53,6 +53,8 @@ FEATURES = ["log_pop", "log_freq", "coverage", "log_workers", "elderly_ratio", "
 R2_TARGET = 0.6
 
 gj = pd.read_csv(D / "grid_join.csv")
+if "daytype" in gj.columns:      # 요일축 도입 이후 grid_join.csv — 검증은 평일 기준을 그대로 쓴다.
+    gj = gj[gj["daytype"] == "wd"].drop(columns=["daytype"]).reset_index(drop=True)
 gm = pd.read_csv(D / "grid_metrics.csv")
 gh = pd.read_csv(D / "grid_hwaseong.csv")
 

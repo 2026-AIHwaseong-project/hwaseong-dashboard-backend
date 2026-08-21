@@ -55,6 +55,7 @@ except ImportError:
     pass  # python-dotenv 미설치면 셸 환경변수만 사용
 STATIC = ROOT / "server" / "static"
 PERIODS = ["am", "day", "pm", "night"]
+DAYTYPES = ["wd", "we"]   # 평일·주말. wd 는 기존 데이터 키(grid_{period})를 그대로 쓴다
 PERIOD_NAME = {"am": "출근", "day": "낮", "pm": "퇴근", "night": "심야"}
 PERIOD_HOURS = {"am": "07–09", "day": "09–17", "pm": "17–19", "night": "22–24"}
 QUAD_LABEL = {
@@ -80,6 +81,12 @@ def _load_json() -> dict:
     """계약 JSON 에서 읽는 기본 경로. DB 없이도 서버는 이대로 완전히 동작합니다."""
     src = {f"grid_{p}": json.loads((STATIC / f"grid_{p}.json").read_text("utf-8"))
            for p in PERIODS}
+    # 요일축 — grid_{p}_we.json 이 있으면 같이 올린다(05_load.py 를 안 돌린 배포본은
+    # 조용히 빠진다. get_grid 가 없는 키를 404 로 안내한다).
+    for p in PERIODS:
+        we = STATIC / f"grid_{p}_we.json"
+        if we.exists():
+            src[f"grid_{p}_we"] = json.loads(we.read_text("utf-8"))
     for k in ("meta", "stops", "routes", "profiles"):
         src[k] = json.loads((STATIC / f"{k}.json").read_text("utf-8"))
     return src
@@ -97,6 +104,9 @@ async def lifespan(app: FastAPI):
         print("[server] 계약 JSON 에서 로드", flush=True)
     DATA.update(src)
     DATA["cells"] = {p: {c["id"]: c for c in DATA[f"grid_{p}"]["cells"]} for p in PERIODS}
+    for p in PERIODS:
+        if f"grid_{p}_we" in DATA:
+            DATA["cells"][f"{p}_we"] = {c["id"]: c for c in DATA[f"grid_{p}_we"]["cells"]}
 
     spec = importlib.util.spec_from_file_location("hw_sim", ROOT / "analysis" / "05_simulate.py")
     m = importlib.util.module_from_spec(spec)
@@ -170,6 +180,19 @@ if _FRONT.exists():
 def _chk_period(p: str):
     if p not in PERIODS:
         raise HTTPException(400, f"period는 {PERIODS} 중 하나여야 합니다.")
+
+
+def _chk_daytype(dt: str):
+    if dt not in DAYTYPES:
+        raise HTTPException(400, f"daytype은 {DAYTYPES} 중 하나여야 합니다.")
+
+
+def _grid_key(period: str, daytype: str) -> str:
+    """DATA 안의 grid_* 키. wd 는 기존 키를 그대로 쓴다(계약 불변)."""
+    key = f"grid_{period}" if daytype == "wd" else f"grid_{period}_we"
+    if key not in DATA:
+        raise HTTPException(404, f"{key} 데이터가 없습니다 — 05_load.py 를 다시 실행했는지 확인하세요.")
+    return key
 
 
 def _make_reason(cell: dict) -> str:
@@ -404,16 +427,18 @@ def get_meta():
 
 # ─── 2. GET /api/v1/grid ───────────────────────────────────────────────────────
 @app.get("/api/v1/grid")
-def get_grid(period: str = Query("am")):
+def get_grid(period: str = Query("am"), daytype: str = Query("wd")):
     _chk_period(period)
-    return _json(DATA[f"grid_{period}"])
+    _chk_daytype(daytype)
+    return _json(DATA[_grid_key(period, daytype)])
 
 
 # ─── 3. GET /api/v1/priorities ─────────────────────────────────────────────────
 @app.get("/api/v1/priorities")
-def get_priorities(period: str = Query("am"), limit: int = Query(10)):
+def get_priorities(period: str = Query("am"), limit: int = Query(10), daytype: str = Query("wd")):
     _chk_period(period)
-    cells = [c for c in DATA[f"grid_{period}"]["cells"]
+    _chk_daytype(daytype)
+    cells = [c for c in DATA[_grid_key(period, daytype)]["cells"]
              if c["quadrant"] in ("need", "drt")]
     cells.sort(key=lambda c: c["priorityScore"], reverse=True)
     items = [
@@ -435,7 +460,7 @@ def get_priorities(period: str = Query("am"), limit: int = Query(10)):
         }
         for i, c in enumerate(cells[:limit])
     ]
-    return {"period": period, "items": items}
+    return {"period": period, "daytype": daytype, "items": items}
 
 
 # ─── 4. GET /api/v1/stops ──────────────────────────────────────────────────────
@@ -523,7 +548,8 @@ class RecRequest(BaseModel):
 
 def _greedy(sim, strategy: str, budget: int, max_pl: int,
             allowed_types: list, region_ids=None, period: str = "am") -> tuple:
-    """전략별 그리디. (placed, state, stopped) 반환.
+    """전략별 그리디. (placed, state, stopped, state_we) 반환.
+    state_we 는 주말 기준선에 같은 배치를 적용한 상태 — S0_WE 가 없으면 None.
 
     stopped 는 왜 멈췄는지다. 계약(docs/API_SPEC.md §8)에 있는 값이고,
     없으면 화면이 "0건인데 예산 소진" 같은 모순 문구를 낸다.
@@ -547,9 +573,21 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
     freq_cnt: dict = {}
     budget_left = budget
 
+    # 요일축 — 화면(시뮬레이션)엔 평일/주말 토글이 없지만, 추천은 "주말까지
+    # 반영"한다. 물리 시설은 요일과 무관하게 그 자리에 있으므로, 같은 배치를
+    # 주말 기준선(S0_WE)에도 나란히 적용해 목적함수에 더한다. S0_WE 가 없으면
+    # (팀원이 04_model.py 를 아직 안 돌렸다든지) 조용히 평일만으로 동작한다.
+    has_we = getattr(sim, "S0_WE", None) is not None
+    state_we = ({period: {"freq": sim.S0_WE[period]["freq"].copy(),
+                          "nearest": sim.S0_WE[period]["nearest"].copy()}}
+                if has_we else None)
+
     # 후보는 **요청 시간대**의 사분면으로 고른다. 심야에만 사각지대인 격자가
     # am 기준 후보 목록에서 통째로 빠지던 문제를 여기서 막는다.
+    # 주말에만 사각지대인 격자도 같은 이유로 후보에서 빠지면 안 되므로 합집합.
     cand_mask = np.isin(sim.S0[period]["quad0"], ["need", "drt"])
+    if has_we:
+        cand_mask = cand_mask | np.isin(sim.S0_WE[period]["quad0"], ["need", "drt"])
     # `if region_ids:` 로 쓰면 빈 집합이 falsy 라 필터가 통째로 건너뛰어진다.
     # 오타난 읍면동을 보냈을 때 조용히 화성시 전체 결과가 나오는 게 더 위험하다.
     # None(=범위 지정 없음)과 빈 집합(=그 동에 후보 없음)을 구분한다.
@@ -572,8 +610,12 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
 
     # equity 의 수혜 대상(need/drt) 마스크 — 기준선 사분면 기반이라 불변.
     # 목적함수가 요청 시간대 하나이므로 그 시간대만 만든다.
-    eld_mask = ({period: np.isin(sim.S0[period]["quad0"], ["need", "drt"])}
-                if strategy == "equity" else None)
+    eld_mask = None
+    if strategy == "equity":
+        _em = np.isin(sim.S0[period]["quad0"], ["need", "drt"])
+        if has_we:
+            _em = _em | np.isin(sim.S0_WE[period]["quad0"], ["need", "drt"])
+        eld_mask = {period: _em}
 
     for _ in range(max_pl):
         if budget_left < min_cost:
@@ -588,6 +630,10 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
         # 목적함수가 요청 시간대 하나이므로 기준 벡터도 그 시간대만 만든다.
         c0 = np.clip(1 - state[period]["nearest"] / sim.COVM, 0.05, 1.0)
         curBvec = {period: sim.Bhat(period, state[period]["freq"], c0)}
+        curBvec_we = None
+        if has_we:
+            c0_we = np.clip(1 - state_we[period]["nearest"] / sim.COVM, 0.05, 1.0)
+            curBvec_we = sim.Bhat(period, state_we[period]["freq"], c0_we, dt="we")
 
         best = None
 
@@ -670,6 +716,29 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                     else:
                         tB += float(b_sub.sum()) - float(curBvec[p][idx].sum())
 
+                    # 요일축 — 같은 물리 배치를 주말 기준선에도 적용해 목적함수에 더한다.
+                    # idx/d/ms/mult 는 물리 좌표만으로 정해지므로 그대로 재사용한다.
+                    if has_we:
+                        fwe_sub = state_we[p]["freq"][idx]
+                        nwe_sub = state_we[p]["nearest"][idx]
+                        if mode == "stop":
+                            fwe_sub = fwe_sub + sim.FSTAR[p] * (1 - d[idx] / sim.WALK)
+                            nwe_sub = np.minimum(nwe_sub, d[idx])
+                        elif mode == "drt":
+                            fwe_sub = fwe_sub + sim.PHI[p] * (1 - d[idx] / sim.R_FINAL["drt"])
+                        else:
+                            fwe_sub = fwe_sub + sim.Wsg[np.ix_(idx, ms)] @ (sim.STOP_FREQ_WE[p][ms] * mult)
+                        cwe_sub = np.clip(1 - nwe_sub / sim.COVM, 0.05, 1.0)
+                        Pwe = sim.POIS_WE[p]
+                        bwe_sub = Pwe["mu"][idx] * np.exp(np.clip(
+                            Pwe["b2"] * (np.log1p(fwe_sub) - Pwe["lq0"][idx])
+                            + Pwe["b3"] * (cwe_sub - Pwe["cov0"][idx]), -20, 6))
+                        if strategy == "equity":
+                            w_we = sim.S0_WE[p]["eldw"][idx] * eld_mask[p][idx]
+                            tB += float((bwe_sub * w_we).sum()) - float((curBvec_we[idx] * w_we).sum())
+                        else:
+                            tB += float(bwe_sub.sum()) - float(curBvec_we[idx].sum())
+
                 eff = tB / cost
                 if best is None or eff > best["eff"]:
                     best = {"mode": mode, "gi": gi, "tB": tB, "eff": eff, "cost": cost}
@@ -705,6 +774,29 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                 f += sim.Wsg[:, ms] @ (sim.STOP_FREQ[p][ms] * mult)
             # 비교 기준(curBvec)은 다음 스텝 시작에서 새 상태로 다시 계산된다
 
+        # 같은 물리 배치를 주말 상태(요청 시간대만)에도 반영 — 다음 스텝의
+        # 목적함수와, 루프 종료 후 주말 영향 보고 둘 다 이 상태를 읽는다.
+        if has_we:
+            p = period
+            d = sim.Dg[gi]
+            f = state_we[p]["freq"]
+            n = state_we[p]["nearest"]
+            if mode == "stop":
+                mw = d <= sim.WALK
+                f[mw] += sim.FSTAR[p] * (1 - d[mw] / sim.WALK)
+                mc = d <= sim.R_FINAL["stop"]
+                n[mc] = np.minimum(n[mc], d[mc])
+            elif mode == "drt":
+                r = sim.R_FINAL["drt"]
+                m = d <= r
+                f[m] += sim.PHI[p] * (1 - d[m] / r)
+            elif mode == "freq":
+                ds = np.sqrt((sim.SX - sim.GX[gi])**2 + (sim.SY - sim.GY[gi])**2)
+                ms = ds <= sim.R_FINAL["freq"]
+                cnt = freq_cnt.get(gi, 0)
+                mult = sim.HEADWAY_MULT ** (cnt + 1) - sim.HEADWAY_MULT ** cnt
+                f += sim.Wsg[:, ms] @ (sim.STOP_FREQ_WE[p][ms] * mult)
+
         if mode == "freq":
             freq_cnt[gi] = freq_cnt.get(gi, 0) + 1
         used.add((mode, gi))
@@ -713,7 +805,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
         region_cnt[reg] = region_cnt.get(reg, 0) + 1
         placed.append({"mode": mode, "gi": gi, "gid": gid, "tB": best["tB"], "cost": cost})
 
-    return placed, state, stopped
+    return placed, state, stopped, state_we
 
 
 @app.post("/api/v1/recommendations")
@@ -755,7 +847,7 @@ def run_recommendations(req: RecRequest):
     # 곧 1건 추천이라서다. efficiency 로 대체하고 alternatives 에서도 뺀다.
     strategy = "efficiency" if (region_ids is not None and req.strategy == "balance") else req.strategy
 
-    placed, final_state, stopped = _greedy(
+    placed, final_state, stopped, final_state_we = _greedy(
         sim, strategy, req.budgetKrw, req.maxPlacements,
         list(req.allowedTypes), region_ids, req.period,
     )
@@ -796,13 +888,35 @@ def run_recommendations(req: RecRequest):
     narrative_provider = _detect_provider()
     narrative_label = _PROVIDERS[narrative_provider]["label"] if narrative_provider else "AI 미설정 — 규칙 기반 초안"
 
+    # 요일축 — 화면(시뮬레이션)엔 토글이 없지만, 추천 선정 자체가 이미 주말을
+    # 반영했다(_greedy 의 tB 가 wd+we 합산). 여기서는 그 선택의 주말 쪽 결과를
+    # 숫자로 보고한다 — AI 보고서가 "주말에도 도움이 된다"고 말할 근거.
+    weekend_impact = None
+    if final_state_we is not None:
+        p = req.period
+        bk_we = sim.BASE_KPI_WE[p]
+        r_we = sim.compute(p, final_state_we[p]["freq"], final_state_we[p]["nearest"], dt="we")
+        now_trips, now_eld = _trips_kpi(p, r_we["quad"])
+        base_trips, base_eld = _trips_kpi(p, sim.S0_WE[p]["quad0"])
+        weekend_impact = {
+            "period": p,
+            "needCellsDelta": r_we["need"] - bk_we["need"],
+            "drtCellsDelta": r_we["drt"] - bk_we["drt"],
+            "potentialTripsPerDayDelta": now_trips - base_trips,
+            "elderlyTripsPerDayDelta": now_eld - base_eld,
+            "note": "같은 배치안을 주말 기준선(별도 배차·수요 실측)에 적용했을 때의 효과입니다. "
+                    "추천 선정 자체가 이미 이 효과를 반영해 골랐습니다 — 부가 정보가 아닙니다.",
+        }
+
     result = {
         "method": "budget-constrained greedy marginal benefit",
         "methodLabel": "예산 제약 하 한계효과 최대화",
         "methodNote": f"{PERIOD_NAME[req.period]} 시간대 기준으로, 미해결 통행량을 "
                       "사업비 1원당 가장 많이 줄이는 지점을 순차 선택합니다. "
                       "수단은 정류장 접근성(coverage)으로 배타 결정되며, "
-                      "배치 효과는 4개 시간대 전부에 반영해 보고합니다.",
+                      "배치 효과는 4개 시간대 전부에 반영해 보고합니다."
+                      + ("" if weekend_impact is None else
+                         " 후보 선정과 효과 계산 모두 평일뿐 아니라 주말 수요·배차까지 함께 반영했습니다."),
         # 요청에 없었으면 null = 화성시 전체 (docs/API_SPEC.md §8)
         "region": req.region or None,
         "strategy": strategy,
@@ -841,6 +955,7 @@ def run_recommendations(req: RecRequest):
                                "똑버스·증편은 이듬해에도 같은 예산이 필요합니다.",
         },
         "simulation": sim_resp,
+        "weekendImpact": weekend_impact,
     }
 
     if req.includeAlternatives:
@@ -853,8 +968,8 @@ def run_recommendations(req: RecRequest):
                 # 대안 전략도 본안과 **같은 시간대**로 비교해야 한다.
                 # period 를 안 넘기면 본안만 요청 시간대이고 대안 4종은 출근 기준이 되어,
                 # 화면의 전략 비교표가 서로 다른 시간대를 나란히 놓게 된다.
-                ap, _, _st = _greedy(sim, s, req.budgetKrw, req.maxPlacements,
-                                     alt_types, region_ids, req.period)
+                ap, _, _st, _ = _greedy(sim, s, req.budgetKrw, req.maxPlacements,
+                                        alt_types, region_ids, req.period)
                 alts.append({
                     "strategy": s, "label": STRAT_META[s]["label"],
                     "count": len(ap), "totalKrw": sum(p["cost"] for p in ap),
@@ -969,7 +1084,7 @@ def _default_model(provider: str) -> str:
     return _PROVIDERS[provider]["default_model"]
 
 
-def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
+def _fallback_report(period: str, kpi: dict, priorities: list, daytype: str = "wd") -> dict:
     """AI 키가 없을 때 쓰는 규칙 기반 초안.
 
     「AI 보고서 생성」 버튼이 깨지지 않게 하려는 것이다. 서버를 만든 첫 번째 이유가
@@ -980,20 +1095,21 @@ def _fallback_report(period: str, kpi: dict, priorities: list) -> dict:
        응답에 isAiGenerated: false 를 실어 화면이 구분할 수 있게 한다.
     """
     pn, ph = PERIOD_NAME[period], PERIOD_HOURS[period]
+    dn = "평일" if daytype == "wd" else "주말"
     need, total = kpi.get("needCells", 0), kpi.get("totalCells", 0)
     share, trips = kpi.get("needShare", 0), kpi.get("potentialTripsPerDay", 0)
     eld = kpi.get("elderlyTripsPerDay", 0)
     top = priorities[:5]
     return {
         "title": "화성시 대중교통 수급 불일치 분석 및 노선 조정 검토(안)",
-        "subtitle": f"{pn} 시간대({ph}) 기준",
+        "subtitle": f"{dn} · {pn} 시간대({ph}) 기준",
         "org": "화성시", "dept": "교통정책과", "period": period,
         "provider": "규칙 기반 초안 (AI 미사용)", "model": None,
         "isAiGenerated": False,
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "sections": [
             {"key": "summary", "heading": "1. 검토 개요",
-             "body": f"{pn} 시간대({ph}) 기준으로 화성시 {total}개 격자를 분석한 결과, "
+             "body": f"{dn} {pn} 시간대({ph}) 기준으로 화성시 {total}개 격자를 분석한 결과, "
                      f"수요 대비 공급이 부족한 격자가 {need}개({share}%)로 나타났다. "
                      f"해당 격자의 잠재 통행량은 일 {trips:,}통행이며 이 중 고령층 추정은 "
                      f"{eld:,}통행이다.",
@@ -1278,6 +1394,11 @@ async def draft_report(req: ReportRequest):
 
     period_name  = PERIOD_NAME[req.period]
     period_hours = PERIOD_HOURS[req.period]
+    # 요일축 — 대시보드는 토글이 있어 context.daytype 을 보내지만(report.js),
+    # 시뮬레이션 화면은 토글이 없어 안 보내면 'wd'(기존 동작)로 본다.
+    daytype = req.context.get("daytype") or "wd"
+    _chk_daytype(daytype)
+    daytype_name = "평일" if daytype == "wd" else "주말"
     # 프론트는 값이 없으면 키를 빼는 게 아니라 null 을 보낸다 (kpi: null).
     # dict.get(key, 기본값) 은 키가 있으면 None 을 그대로 돌려주므로
     # None[:5] 로 터진다 — `or` 로 None 까지 걸러야 한다.
@@ -1285,28 +1406,35 @@ async def draft_report(req: ReportRequest):
     priorities   = (req.context.get("priorities") or [])[:5]
 
     # 프론트가 context 를 안 보내도 서버가 자기 데이터로 채운다.
-    # 그래야 폴백이 빈 보고서가 되지 않는다.
+    # 그래야 폴백이 빈 보고서가 되지 않는다. daytype 도 여기서 반영한다.
     if not kpi:
-        kpi = DATA[f"grid_{req.period}"]["kpi"]
+        kpi = DATA[_grid_key(req.period, daytype)]["kpi"]
     if not priorities:
-        pf = STATIC / f"priorities_{req.period}.json"
+        sfx = "" if daytype == "wd" else "_we"
+        pf = STATIC / f"priorities_{req.period}{sfx}.json"
         if pf.exists():
             priorities = json.loads(pf.read_text("utf-8"))["items"][:5]
 
     # 키가 하나도 없으면 AI 를 시도하지 않고 바로 규칙 기반 초안을 준다.
     # 500 을 던지면 화면의 「AI 보고서 생성」 버튼이 그냥 깨진다.
     if provider is None:
-        return _fallback_report(req.period, kpi, priorities)
+        return _fallback_report(req.period, kpi, priorities, daytype)
     model = req.model or _default_model(provider)
     sim_ctx      = req.context.get("simulation")
     rec_ctx      = req.context.get("recommendation")
 
     sim_block = ("시뮬레이션 결과:\n" + json.dumps(sim_ctx, ensure_ascii=False, indent=2)) if sim_ctx else ""
     rec_block = ("추천 배치안:\n"      + json.dumps(rec_ctx, ensure_ascii=False, indent=2)) if rec_ctx else ""
+    # weekendImpact 는 rec_ctx 안에 그냥 JSON으로 묻혀 들어가면 모델이 못 보고 지나칠 수
+    # 있다 — 있으면 반드시 짚으라고 한 줄로 못박는다.
+    weekend_note = ("\n(주의: 추천 배치안에 weekendImpact 가 포함돼 있습니다 — 이 안이 "
+                    f"{daytype_name}뿐 아니라 주말 수요·공급에도 미치는 효과이니, "
+                    "효과 설명 섹션에서 반드시 언급하세요.)"
+                    if rec_ctx and rec_ctx.get("weekendImpact") else "")
 
     prompt = f"""화성시 버스 수요·공급 미스매칭 분석 보고서 초안을 {req.tone} 형식으로 작성해주세요.
 
-분석 시간대: {period_name} ({period_hours})
+분석 기준: {daytype_name} · {period_name} ({period_hours})
 
 현황 데이터:
 - 고수요·저공급(need) 격자: {kpi.get('needCells', '미제공')}개 / 전체 {kpi.get('totalCells', DATA['meta']['grid']['cellCount'])}개
@@ -1319,12 +1447,13 @@ async def draft_report(req: ReportRequest):
 
 {sim_block}
 {rec_block}
+{weekend_note}
 
 다음 섹션을 포함하여 JSON으로 보고서를 작성하세요 (sections: {json.dumps(req.sections, ensure_ascii=False)}):
 
 {{
   "title": "화성시 대중교통 수급 불일치 분석 및 노선 조정 검토(안)",
-  "subtitle": "{period_name} 시간대({period_hours}) 기준",
+  "subtitle": "{daytype_name} · {period_name} 시간대({period_hours}) 기준",
   "org": "화성시", "dept": "교통정책과",
   "period": "{req.period}",
   "generatedAt": "(생성 일시)",
@@ -1373,7 +1502,7 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
     except Exception as e:
         # 패키지 미설치·키 오류·네트워크 장애 어느 쪽이든 보고서는 나가야 한다.
         # 발표 중에 500 을 띄우느니 규칙 기반 초안을 주고 사유를 함께 적는다.
-        fb = _fallback_report(req.period, kpi, priorities)
+        fb = _fallback_report(req.period, kpi, priorities, daytype)
         if isinstance(e, AIBusy):
             detail = "지금 AI 요청이 몰려 있습니다. 잠시 후 다시 눌러 주세요"
         else:

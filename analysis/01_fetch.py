@@ -151,6 +151,9 @@ for i, r in enumerate(routes, 1):
         r.update({
             "peek_alloc": it.get("peekAlloc"), "npeek_alloc": it.get("nPeekAlloc"),
             "night_alloc": it.get("nightAlloc"), "dispatch_num": it.get("dispatchNum"),
+            # 요일축 — 같은 응답 안에 토/일 배차가 이미 들어있다(재요청 불필요)
+            "sat_peek_alloc": it.get("satPeekAlloc"), "sat_npeek_alloc": it.get("satNPeekAlloc"),
+            "sun_peek_alloc": it.get("sunPeekAlloc"), "sun_npeek_alloc": it.get("sunNPeekAlloc"),
             "up_first": it.get("upFirstTime"), "up_last": it.get("upLastTime"),
             "region": it.get("region"), "company": it.get("companyName"),
             "gg_route_name": str(it.get("routeName") or ""), "route_type_cd": it.get("routeTypeCd"),
@@ -166,6 +169,7 @@ save(routes, "routes.csv",
      ["route_id", "gg_route_id", "route_no", "route_type", "route_type_cd",
       "start_stop", "end_stop", "first_time", "last_time",
       "peek_alloc", "npeek_alloc", "night_alloc", "dispatch_num",
+      "sat_peek_alloc", "sat_npeek_alloc", "sun_peek_alloc", "sun_npeek_alloc",
       "up_first", "up_last", "region", "company", "gg_route_name"])
 
 print("=" * 64)

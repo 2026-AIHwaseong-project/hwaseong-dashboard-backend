@@ -61,6 +61,8 @@ ROOT = Path(__file__).resolve().parent.parent
 D_DIR = ROOT / "dataset_hwaseong"
 
 PERIODS = ["am", "day", "pm", "night"]
+DAYTYPES = ["wd", "we"]    # 평일·주말. wd 산출물은 기존 파일명·키를 그대로 유지한다
+                           # (05_simulate.py·07_validate.py 가 고정 사용 — 계약을 안 바꾼다)
 MI_THRESHOLDS = [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2]
 COV_THRESHOLD_M = 600.0
 ALPHA_D = 0.5
@@ -113,17 +115,21 @@ def main():
     loP, hiP = pctl(lp, 0.03), pctl(lp, 0.97)
     popW = pd.Series(np.clip((lp - loP) / max(hiP - loP, 1e-9), 0, 1), index=pop_all.index)
 
-    norm_stats = {"periods": {}, "constants": {
+    # wd 는 기존 키·파일명을 그대로 쓴다("periods") — 05_simulate.py·07_validate.py 가
+    # 이 계약을 고정으로 읽는다. we 는 새 키("periods_we")로 나란히 추가한다.
+    norm_stats = {"periods": {}, "periods_we": {}, "constants": {
         "alphaD": ALPHA_D, "wFreq": W_FREQ, "wCov": W_COV, "dampExp": DAMP_EXP,
         "miClamp": MI_CLAMP, "covThresholdM": COV_THRESHOLD_M,
         "miThresholds": MI_THRESHOLDS, "elderlyCoef": ELD_COEF,
         "normMethod": "log1p -> P3/P97 clamp min-max (pctl=lower)",
         "quadCuts": QUAD, "popWeightBounds": {"loP": loP, "hiP": hiP},
     }}
+    NORM_KEY = {"wd": "periods", "we": "periods_we"}
 
     rows = []
-    for t in PERIODS:
-        sub = gj[gj["period"] == t].reset_index(drop=True)
+    PAIRS = [(dt, t) for dt in DAYTYPES for t in PERIODS]
+    for dt, t in PAIRS:
+        sub = gj[(gj["period"] == t) & (gj["daytype"] == dt)].reset_index(drop=True)
         lb = np.log1p(sub["boardings"])
         lf = np.log1p(sub["potential"])
         lq = np.log1p(sub["freq"])
@@ -147,10 +153,10 @@ def main():
         # 격자를 세분화하면 빈 셀 비중이 늘어 분위 기준점이 0 으로 주저앉을 수 있다.
         # 그러면 감쇠([3])와 drt 게이트가 무력화된다 — 조용히 지나가지 않게 잡는다.
         if K["fRef"] <= 0:
-            print(f"  ⚠️ {t}: fRef=0 — 빈 셀 비중 증가로 drt 게이트 무력화. "
+            print(f"  ⚠️ {dt}/{t}: fRef=0 — 빈 셀 비중 증가로 drt 게이트 무력화. "
                   "fref_q 분위를 인구>0 셀 기준으로 재산정 필요 (README §2)")
         if K["dRef"] < 0.05:
-            print(f"  ⚠️ {t}: dRef={K['dRef']:.4f} — MI 감쇠 기준점이 0 근처. 재튜닝 필요")
+            print(f"  ⚠️ {dt}/{t}: dRef={K['dRef']:.4f} — MI 감쇠 기준점이 0 근처. 재튜닝 필요")
         damp = np.clip(D / K["dRef"], 0, 1) ** DAMP_EXP
         mi_raw = (zD - zS) * damp
         mi = np.clip(mi_raw, -MI_CLAMP, MI_CLAMP)
@@ -202,12 +208,12 @@ def main():
         bin_s = np.sum(S[:, None] > np.array(K["sBinT"])[None, :], axis=1)
         bin_f = np.sum(nf[:, None] > np.array(K["fBinT"])[None, :], axis=1)
 
-        norm_stats["periods"][t] = {
+        norm_stats[NORM_KEY[dt]][t] = {
             k: (list(map(float, v)) if isinstance(v, list) else float(v))
             for k, v in K.items()
         }
         rows.append(pd.DataFrame({
-            "grid_id": sub["grid_id"], "period": t,
+            "grid_id": sub["grid_id"], "period": t, "daytype": dt,
             "D": np.round(D, 6), "S": np.round(S, 6),
             "zD": np.round(zD, 4), "zS": np.round(zS, 4),
             "mi": np.round(mi, 4), "mi_raw": np.round(mi_raw, 4),
@@ -226,9 +232,11 @@ def main():
             "lon": sub["lon"], "lat": sub["lat"],
         }))
 
-    res = pd.concat(rows, ignore_index=True)
+    res_all = pd.concat(rows, ignore_index=True)
+    res = res_all[res_all["daytype"] == "wd"].reset_index(drop=True)         # 기존 계약
+    res_we = res_all[res_all["daytype"] == "we"].reset_index(drop=True)     # 새 요일축
 
-    # 저장
+    # 저장 — wd 는 파일명·컬럼 전부 기존과 동일(계약 유지). we 는 별도 파일로 나란히 둔다.
     out_cols = [
         "grid_id", "period", "D", "S", "zD", "zS", "mi", "quadrant", "priority",
         "bin_mi", "bin_demand", "bin_supply", "coverage", "freq", "pop", "workers",
@@ -238,6 +246,7 @@ def main():
         "lon", "lat",
     ]
     res[out_cols].to_csv(D_DIR / "grid_metrics.csv", index=False, encoding="utf-8-sig")
+    res_we[out_cols].to_csv(D_DIR / "grid_metrics_we.csv", index=False, encoding="utf-8-sig")
     with open(D_DIR / "norm_stats.json", "w", encoding="utf-8") as f:
         json.dump(norm_stats, f, ensure_ascii=False, indent=2)
 
@@ -251,8 +260,8 @@ def main():
     for t in ["am", "night"]:
         top = res[(res.period == t) & (res.priority > 0)].nlargest(5, "priority")
         print(f"{t} 우선순위 top-5:", [f"{r.grid_id}({r.region})" for r in top.itertuples()])
-    dt = res[(res.period == "am") & res.region.str.startswith("동탄", na=False)]
-    print("동탄 계열 am:", dt.groupby("quadrant").size().to_dict())
+    dongtan = res[(res.period == "am") & res.region.str.startswith("동탄", na=False)]
+    print("동탄 계열 am:", dongtan.groupby("quadrant").size().to_dict())
     print(f"저장: grid_metrics.csv {len(res)}행 · norm_stats.json")
 
     # ── 검증. 조용히 틀리는 종류의 계산이라 눈으로 보는 것만으론 부족하다.
@@ -269,6 +278,22 @@ def main():
     sets = {t: set(res[(res.period == t) & (res.quadrant == "need")]["grid_id"]) for t in PERIODS}
     assert any(sets[t] != sets["am"] for t in PERIODS[1:]), "모든 시간대 need 가 동일 — 시간축이 죽었습니다"
     print("검증 통과 — 절대 가드 · 고령비 클립 · MI 클램프 · 시간축")
+
+    # ── we(주말) 도 같은 가드로 확인한다. 다만 need 비중 대역(2~25%)은 wd 실측으로
+    # 튜닝된 값이라 — 주말은 표본이 달라 이 대역을 살짝 벗어나도 로직 결함은 아니다.
+    # 그래서 절대 가드·클램프·클립·시간축은 assert 로, need 비중은 경고로만 본다.
+    print(f"\n저장: grid_metrics_we.csv {len(res_we)}행")
+    ph_we = res_we["period"].map(PERIOD_HOURS)
+    bad_we = res_we[res_we["quadrant"].isin(["over", "ok"]) & (res_we["freq"] / ph_we < MIN_FREQ_PER_H)]
+    assert bad_we.empty, f"[we] 운행 부족한데 over/ok 인 격자 {len(bad_we)}곳 — 절대 가드 확인"
+    assert res_we["mi"].between(-MI_CLAMP, MI_CLAMP).all(), "[we] MI 클램프가 안 먹었습니다"
+    assert (res_we.loc[res_we["quadrant"] != "need", "priority"] == 0).all(), "[we] need 아닌데 우선순위가 있습니다"
+    for t in PERIODS:
+        share_we = (res_we[(res_we.period == t) & (res_we.quadrant == "need")].shape[0]
+                    / res_we["grid_id"].nunique())
+        flag = "" if 0.02 <= share_we <= 0.25 else "  ⚠️ wd 튜닝 대역(2~25%) 밖 — 로직 결함은 아니고 요일별 재튜닝 검토 대상"
+        print(f"  [we] {t} need 비중 {share_we:.1%}{flag}")
+    print("[we] 검증 통과 — 절대 가드 · MI 클램프")
     return res
 
 
