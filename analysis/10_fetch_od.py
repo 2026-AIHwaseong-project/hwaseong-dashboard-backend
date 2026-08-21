@@ -2,8 +2,10 @@
 """
 교통카드 빅데이터(STCIS) 15분단위 OD 수집 — 잠재수요를 실측으로 바꾸기 위한 시험 수집
 
-    출력  od_quarter.csv   출발동 · 도착동 · 시간 · 15분 · 통행수 · 평균통행시간
-          od_meta.json     수집 범위와 한계
+    출력  od_quarter_{wd|we}.csv   출발동 · 도착동 · 시간 · 15분 · 통행수 · 평균통행시간
+          od_meta_{wd|we}.json     수집 범위와 한계
+          (접미사는 OD_DATE 가 평일이면 wd, 토/일이면 we — 같은 스크립트로 두 번 돌려
+           평일·주말 대표값을 각각 받는다)
 
 왜 필요한가
 -----------
@@ -46,6 +48,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -58,6 +61,12 @@ D = ROOT / "dataset_hwaseong"
 KEY = os.getenv("STCIS_KEY", "")
 SGG = ["41591", "41593", "41595", "41597"]     # 화성시 4개 구
 DATE = os.getenv("OD_DATE", "20260601")        # 월요일. 평일 대표값.
+# 요일축 — DATE 하나로 평일/주말 실행을 겸한다. 파일명이 갈라져야 두 번 돌려도
+# 서로 덮어쓰지 않는다. 토·일 둘 다 "we" 하나로 묶는다(시간대 배분용 대표값이라
+# 토/일을 따로 볼 정밀도까지는 필요 없다 — 배차처럼 공급 자체가 요일별로 갈리는
+# 값이 아니다).
+_d = date(int(DATE[:4]), int(DATE[4:6]), int(DATE[6:8]))
+SFX = "we" if _d.weekday() >= 5 else "wd"
 # 호출 1회가 1.5초라 TOP_N 을 올리면 제곱으로 늘어난다. 25 면 약 16분.
 TOP_N = int(os.getenv("OD_TOP_N", "25"))
 DAILY_CAP = 10000
@@ -130,7 +139,7 @@ for i, (a, b) in enumerate(pairs, 1):
 
 print("=" * 66)
 print("[3] 저장")
-with open(D / "od_quarter.csv", "w", encoding="utf-8-sig", newline="") as f:
+with open(D / f"od_quarter_{SFX}.csv", "w", encoding="utf-8-sig", newline="") as f:
     w = csv.writer(f)
     w.writerow(["date", "stg_emd", "stg_nm", "arr_emd", "arr_nm",
                 "hour", "quarter", "trips", "avg_sec"])
@@ -139,7 +148,7 @@ with open(D / "od_quarter.csv", "w", encoding="utf-8-sig", newline="") as f:
                     r["arrEmdCd"], r.get("arrEmdNm", ""),
                     r.get("tzon", ""), r.get("quater", ""),
                     r.get("useStf", 0), r.get("useTm", "")])
-print(f"  -> od_quarter.csv  {len(rows):,}행")
+print(f"  -> od_quarter_{SFX}.csv  {len(rows):,}행")
 
 out = defaultdict(float)
 for r in rows:
@@ -154,9 +163,9 @@ meta = {
                "전수는 188x188=35,344 쌍이라 하루 10,000회 제한을 넘는다." % TOP_N),
     "built": time.strftime("%Y-%m-%d %H:%M"),
 }
-(D / "od_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1),
-                                encoding="utf-8")
-print(f"  -> od_meta.json  통행 {meta['total_trips']:,}건")
+(D / f"od_meta_{SFX}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1),
+                                       encoding="utf-8")
+print(f"  -> od_meta_{SFX}.json  통행 {meta['total_trips']:,}건")
 
 print("  출발 통행 상위 10개 동:")
 for e, v in sorted(out.items(), key=lambda kv: -kv[1])[:10]:

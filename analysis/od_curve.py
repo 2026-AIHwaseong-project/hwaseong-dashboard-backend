@@ -40,11 +40,13 @@ def load_stop_emd(d_dir: Path):
     return out
 
 
-def hourly_by_emd(d_dir: Path, hours):
+def hourly_by_emd(d_dir: Path, hours, sfx="wd"):
     """(시 전체 곡선, {법정동: 곡선}) 반환. OD 가 없으면 (None, {}).
 
-    곡선은 hours 위의 비중 리스트이고 합이 1 이다."""
-    p = Path(d_dir) / "od_quarter.csv"
+    곡선은 hours 위의 비중 리스트이고 합이 1 이다. sfx 로 평일(wd)/주말(we)
+    OD 파일을 고른다 — 주말분이 없는 팀원은 "we" 요청도 (None, {}) 로 조용히
+    빠진다(파이프라인이 깨지지 않는다)."""
+    p = Path(d_dir) / f"od_quarter_{sfx}.csv"
     if not p.exists():
         return None, {}
 

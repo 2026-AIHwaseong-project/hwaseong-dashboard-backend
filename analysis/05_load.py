@@ -168,7 +168,16 @@ except FileNotFoundError:
 except (KeyError, ValueError, TypeError) as e:
     sys.exit(f"grid_spec.json 이 손상됐습니다({e}) — 02_grid.py 를 다시 실행하세요.")
 gm    = pd.read_csv(D_DIR / "grid_metrics.csv")
-gj    = pd.read_csv(D_DIR / "grid_join.csv")
+gj_raw = pd.read_csv(D_DIR / "grid_join.csv")
+# 요일축 도입 이후 grid_join.csv 는 wd/we 가 섞여 있다. 이 파일의 기존 계약(grid_*.json)은
+# 평일 기준이라, gj 는 wd 로 필터해 예전과 똑같이 동작시킨다. we 는 아래 8절에서 따로 쓴다.
+if "daytype" in gj_raw.columns:
+    gj = gj_raw[gj_raw["daytype"] == "wd"].drop(columns=["daytype"]).reset_index(drop=True)
+    gj_we = gj_raw[gj_raw["daytype"] == "we"].drop(columns=["daytype"]).reset_index(drop=True)
+else:
+    gj, gj_we = gj_raw, None
+_WE_METRICS = D_DIR / "grid_metrics_we.csv"
+gm_we = pd.read_csv(_WE_METRICS) if _WE_METRICS.exists() else None
 stops = pd.read_csv(D_DIR / "stops_hwaseong.csv")
 def _plus(name):
     """09_augment_routes 가 만든 보강본이 있으면 그걸 읽는다 (03_join 과 동일 규칙).
@@ -485,9 +494,11 @@ print("grid_*.json 생성 중...")
 
 gh_idx = gh.set_index("grid_id")
 
-for period in PERIODS:
-    gm_p = gm[gm["period"] == period].set_index("grid_id")
-    gj_p = gj[gj["period"] == period].set_index("grid_id")
+def build_grid_jsons(gm_src, gj_src, suffix):
+  """grid_{period}{suffix}.json 을 만든다. suffix="" 는 기존 wd 계약, "_we" 는 새 주말판."""
+  for period in PERIODS:
+    gm_p = gm_src[gm_src["period"] == period].set_index("grid_id")
+    gj_p = gj_src[gj_src["period"] == period].set_index("grid_id")
 
     q_vals = gm_p["quadrant"]
     need_cells  = int((q_vals == "need").sum())
@@ -575,8 +586,15 @@ for period in PERIODS:
         "cells": cells,
     }
 
-    write_json(STATIC_DIR / f"grid_{period}.json", out)
-    print(f"  grid_{period}.json: {len(cells)}개 격자")
+    write_json(STATIC_DIR / f"grid_{period}{suffix}.json", out)
+    print(f"  grid_{period}{suffix}.json: {len(cells)}개 격자")
+
+
+build_grid_jsons(gm, gj, "")
+if gm_we is not None and gj_we is not None:
+    build_grid_jsons(gm_we, gj_we, "_we")
+else:
+    print("  (주말 grid_*_we.json 생략 — grid_metrics_we.csv 없음. 04_model.py 를 다시 돌리세요)")
 
 # ── 9. profiles.json ─────────────────────────────────────────────────────────
 print("profiles.json 생성 중...")
@@ -878,8 +896,10 @@ def priority_reason(r):
 
 # grid_metrics.csv 에 nearest_stop_id/m 가 이미 들어 있다(04_model.py 에서 실음).
 # gj 와 다시 조인하면 접미사가 붙어 KeyError 가 난다.
-for period in PERIODS:
-    top = (gm[(gm["period"] == period) & (gm["priority"] > 0)]
+def build_priority_jsons(gm_src, suffix):
+  """priorities_{period}{suffix}.json 을 만든다. suffix="" 는 기존 wd 계약."""
+  for period in PERIODS:
+    top = (gm_src[(gm_src["period"] == period) & (gm_src["priority"] > 0)]
            .nlargest(10, "priority"))
     items = []
     for rank, (_, r) in enumerate(top.iterrows(), 1):
@@ -898,8 +918,15 @@ for period in PERIODS:
             "nearestStopId": str(r["nearest_stop_id"]) if pd.notna(r["nearest_stop_id"]) else "",
             "reason": priority_reason(r),
         })
-    write_json(STATIC_DIR / f"priorities_{period}.json", {"period": period, "items": items})
-    print(f"  priorities_{period}.json: {len(items)}건")
+    write_json(STATIC_DIR / f"priorities_{period}{suffix}.json", {"period": period, "items": items})
+    print(f"  priorities_{period}{suffix}.json: {len(items)}건")
+
+
+build_priority_jsons(gm, "")
+if gm_we is not None:
+    build_priority_jsons(gm_we, "_we")
+else:
+    print("  (주말 priorities_*_we.json 생략 — grid_metrics_we.csv 없음)")
 
 # ── 11. PostgreSQL 적재 ──────────────────────────────────────────────────────
 # 여기 있던 psycopg2 블록은 analysis/06_load_db.py 로 옮겼습니다.

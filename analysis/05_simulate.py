@@ -57,9 +57,20 @@ COST = {"stop": 4.2e6, "drt": 1.8e8, "freq": 9.5e7}         # 연환산 원/년
 # ---------- 데이터 적재 ----------
 gh   = pd.read_csv(D_DIR / "grid_hwaseong.csv")
 st   = pd.read_csv(D_DIR / "stops_hwaseong.csv")
-gj   = pd.read_csv(D_DIR / "grid_join.csv")
+gj_raw = pd.read_csv(D_DIR / "grid_join.csv")
+# 요일축 — 인터랙티브 시뮬레이션(what-if)은 화면에 토글이 없으므로 평일(gj) 그대로.
+# gj_we 는 추천 엔진이 "주말까지 반영"할 때만 쓴다(아래 S0_we).
+if "daytype" in gj_raw.columns:
+    gj = gj_raw[gj_raw["daytype"] == "wd"].drop(columns=["daytype"]).reset_index(drop=True)
+    gj_we = gj_raw[gj_raw["daytype"] == "we"].drop(columns=["daytype"]).reset_index(drop=True)
+else:
+    gj, gj_we = gj_raw, None
 base = pd.read_csv(D_DIR / "grid_metrics.csv")
-NORM = json.loads((D_DIR / "norm_stats.json").read_text(encoding="utf-8"))["periods"]
+_norm_all = json.loads((D_DIR / "norm_stats.json").read_text(encoding="utf-8"))
+NORM = _norm_all["periods"]
+NORM_WE = _norm_all.get("periods_we") or None
+_WE_METRICS = D_DIR / "grid_metrics_we.csv"
+base_we = pd.read_csv(_WE_METRICS) if _WE_METRICS.exists() else None
 
 GIDS   = gh.grid_id.values
 N      = len(gh)
@@ -83,7 +94,10 @@ Wsg = np.where(Dm <= WALK, 1 - Dm / WALK, 0.0)
 for _j in np.where((Dm <= WALK).sum(0) == 0)[0]:
     _i = int(np.argmin(Dm[:, _j]))
     Wsg[_i, _j] = 1 - min(Dm[_i, _j], WALK - 1) / WALK
-STOP_FREQ = {p: st[f"freq_{p}"].values.astype(float) for p in PERIODS}
+_freq_sfx = "_wd" if f"freq_{PERIODS[0]}_wd" in st.columns else ""   # 요일축 도입 전 st 도 지원
+STOP_FREQ = {p: st[f"freq_{p}{_freq_sfx}"].values.astype(float) for p in PERIODS}
+STOP_FREQ_WE = ({p: st[f"freq_{p}_we"].values.astype(float) for p in PERIODS}
+                if f"freq_{PERIODS[0]}_we" in st.columns else None)
 
 # 격자 간 거리행렬
 Dg = np.sqrt((GX[:, None] - GX[None, :]) ** 2 + (GY[:, None] - GY[None, :]) ** 2)
@@ -112,10 +126,41 @@ for _p in PERIODS:
         boardings = _sub.boardings.values.astype(float),
     )
 
+# 주말 기준선 — 인터랙티브 시뮬레이션은 안 쓴다(화면에 요일 토글 없음). 오직
+# 추천 엔진(_greedy, server/main.py)이 "주말까지 반영해 배치"할 때만 참조한다.
+# 셋 중 하나라도 없으면(팀원이 04_model.py 를 아직 안 돌렸다든지) 조용히 None —
+# 호출부가 없으면 평일만으로 동작해야 한다.
+S0_WE = None
+if gj_we is not None and base_we is not None and NORM_WE is not None:
+    S0_WE = {}
+    for _p in PERIODS:
+        _sub = gj_we[gj_we.period == _p].set_index("grid_id").reindex(GIDS)
+        _bm  = base_we[base_we.period == _p].set_index("grid_id").reindex(GIDS)
+        _K   = NORM_WE[_p]
+        _nb  = np.clip((np.log1p(_sub.boardings.values)  - _K["loB"]) / (_K["hiB"] - _K["loB"]), 0, 1)
+        _nf  = np.clip((np.log1p(_sub.potential.values)  - _K["loF"]) / (_K["hiF"] - _K["loF"]), 0, 1)
+        _D   = 0.5 * _nb + 0.5 * _nf
+        S0_WE[_p] = dict(
+            freq    = _sub.freq.values.astype(float),
+            nearest = _sub.nearest_stop_m.values.astype(float),
+            D=_D,
+            zD      = (_D - _K["mD"]) / _K["sD"],
+            nf      = _nf,
+            damp    = np.clip(_D / _K["dRef"], 0, 1) ** DAMP_EXP,
+            potential = _sub.potential.values.astype(float),
+            eldw    = 1 + ELD * np.minimum(_sub.elderly_ratio.values, 1.0),
+            mi0     = _bm.mi.values,
+            bin0    = _bm.bin_mi.values,
+            quad0   = _bm.quadrant.values,
+            boardings = _sub.boardings.values.astype(float),
+        )
 
-def compute(p, freq, nearest):
-    """공급측 재계산 → mi, quad, bin, KPI. 수요측(D,zD,damp,nf) 고정."""
-    K, ss = NORM[p], S0[p]
+
+def compute(p, freq, nearest, dt="wd"):
+    """공급측 재계산 → mi, quad, bin, KPI. 수요측(D,zD,damp,nf) 고정.
+
+    dt="we" 는 추천 엔진이 주말 영향을 보고할 때만 쓴다(NORM_WE/S0_WE 필요)."""
+    K, ss = (NORM[p], S0[p]) if dt == "wd" else (NORM_WE[p], S0_WE[p])
     cov = np.clip(1 - nearest / COVM, 0.05, 1.0)
     nq  = np.clip((np.log1p(freq) - K["loQ"]) / (K["hiQ"] - K["loQ"]), 0, 1)
     S   = W_FREQ * nq + W_COV * cov
@@ -145,6 +190,13 @@ for _p in PERIODS:
     assert np.abs(BASE_KPI[_p]["mi"] - S0[_p]["mi0"]).max() < 5e-4, f"기준선 불일치: {_p}"
     assert (BASE_KPI[_p]["quad"] == S0[_p]["quad0"]).all(), f"quad 불일치: {_p}"
 
+BASE_KPI_WE = None
+if S0_WE is not None:
+    BASE_KPI_WE = {p: compute(p, S0_WE[p]["freq"], S0_WE[p]["nearest"], dt="we") for p in PERIODS}
+    for _p in PERIODS:
+        assert np.abs(BASE_KPI_WE[_p]["mi"] - S0_WE[_p]["mi0"]).max() < 5e-4, f"[we] 기준선 불일치: {_p}"
+        assert (BASE_KPI_WE[_p]["quad"] == S0_WE[_p]["quad0"]).all(), f"[we] quad 불일치: {_p}"
+
 # ---------- Poisson 회귀 (ΔB̂용) ----------
 POIS = {}
 _gj2 = gj.copy()
@@ -165,10 +217,34 @@ for _p in PERIODS:
     POIS[_p] = dict(b2=_beta[1], b3=_beta[2], mu=_mu,
                     lq0=np.log1p(S0[_p]["freq"]), cov0=BASE_KPI[_p]["cov"])
 
+# 주말 Poisson 회귀 — 같은 식, 같은 피처를 주말 gj_we 로 다시 적합한다.
+# cov0 는 BASE_KPI[_p]["cov"] 를 그대로 쓴다 — nearest_stop_m 은 물리적 거리라
+# 요일과 무관하다(03_join.py 가 daytype 루프 밖에서 한 번만 계산).
+POIS_WE = None
+if S0_WE is not None:
+    POIS_WE = {}
+    _gj2_we = gj_we.copy()
+    _gj2_we["cov600"] = np.clip(1 - _gj2_we.nearest_stop_m / COVM, 0.05, 1.0)
+    for _p in PERIODS:
+        _sub = _gj2_we[_gj2_we.period == _p].set_index("grid_id").reindex(GIDS)
+        _X = np.column_stack([
+            np.log1p(_sub.potential.values), np.log1p(_sub.freq.values),
+            _sub.cov600.values, np.log1p(_sub.workers.values),
+            np.minimum(_sub.elderly_ratio.values, 1.0),
+            np.log1p(_sub.rail_m.fillna(_sub.rail_m.median()).values),
+        ])
+        _y  = _sub.boardings.values
+        _sc = StandardScaler().fit(_X)
+        _m  = PoissonRegressor(alpha=1e-3, max_iter=3000).fit(_sc.transform(_X), _y)
+        _beta = _m.coef_ / _sc.scale_
+        _mu   = _m.predict(_sc.transform(_X))
+        POIS_WE[_p] = dict(b2=_beta[1], b3=_beta[2], mu=_mu,
+                           lq0=np.log1p(S0_WE[_p]["freq"]), cov0=BASE_KPI[_p]["cov"])
 
-def Bhat(p, freq, cov):
+
+def Bhat(p, freq, cov, dt="wd"):
     """기준선 대비 예측 승차 변화 (Σ μ·exp(b2·Δlq + b3·Δcov))"""
-    P = POIS[p]
+    P = POIS[p] if dt == "wd" else POIS_WE[p]
     return P["mu"] * np.exp(
         np.clip(P["b2"] * (np.log1p(freq) - P["lq0"]) + P["b3"] * (cov - P["cov0"]), -20, 6)
     )

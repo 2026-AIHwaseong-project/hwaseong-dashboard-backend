@@ -89,6 +89,7 @@ OD_HOURS = list(range(5, 24))
 SIGUNGU = "41590"          # 화성시 행정표준코드 (프론트 계약의 id 접두어)
 WALK_M = 800               # 도보권. 승하차 안분 반경 겸 커버리지 임계거리
 PERIODS = [("am", 7, 9), ("day", 9, 17), ("pm", 17, 19), ("night", 22, 24)]
+DAYTYPES = ["wd", "we"]    # 평일·주말. sat/sun 배차는 평균해 "we" 하나로 합친다
 AGE = ["a0009", "a1014", "a1519", "a2024", "a2529", "a3034", "a3539",
        "a4044", "a4549", "a5054", "a5559", "a6064", "a6569", "a70p"]
 FLOW_AGE = AGE[:-1]        # 유동인구는 65~69 가 마지막. a70p 는 6569 비율을 대용
@@ -113,7 +114,7 @@ def read_plus(name):
     return read(name)
 
 
-def od_shares():
+def od_shares(sfx="wd"):
     """승차량 B 를 시간대에 나눌 비중. (시 전체, {법정동: 비중}, ARS→법정동)
 
     지금까지는 유동인구 시간배율이 유일한 시간 신호였는데, 그건 '거기 사람이
@@ -126,7 +127,7 @@ def od_shares():
     심야 공백을 스스로 지워 버린다. P 는 유동인구 기준 그대로 둔다.
 
     OD 가 없으면 (None, {}, {}) — 10 을 안 돌린 팀원도 파이프라인이 그대로 돈다."""
-    city_curve, emd_curves = od_curve.hourly_by_emd(D, OD_HOURS)
+    city_curve, emd_curves = od_curve.hourly_by_emd(D, OD_HOURS, sfx)
     if city_curve is None:
         return None, {}, {}
     city = od_curve.period_share(city_curve, OD_HOURS, PERIODS)
@@ -213,34 +214,44 @@ _bwe = sum(s["board_we"] for s in stops.values()) / n_we
 print(f"  초승 일평균  평일 {_bwd:>9,.0f} · 주말 {_bwe:>9,.0f}  (주말/평일 {_bwe / max(_bwd, 1):.3f})")
 
 print("=" * 66)
-print("[2] 노선 → 정류장 운행빈도 (시간대별)")
+print("[2] 노선 → 정류장 운행빈도 (시간대별 · 요일별)")
 routes = {}
 for r in read_plus("routes.csv"):
     peek, npeek, night = num(r["peek_alloc"]), num(r["npeek_alloc"]), num(r["night_alloc"])
+    # 요일축 — GBIS 응답에 토/일 배차가 이미 있다(01_fetch.py). night 는 요일별
+    # 필드가 없어(API 에 없음) wd 와 동일값을 그대로 쓴다 — trips() 의
+    # night-or-npeek-or-peek 폴백이 이미 night 결측을 다루므로 새 문제는 아니다.
+    sat_peek, sat_npeek = num(r.get("sat_peek_alloc")), num(r.get("sat_npeek_alloc"))
+    sun_peek, sun_npeek = num(r.get("sun_peek_alloc")), num(r.get("sun_npeek_alloc"))
+    we_peek = (sat_peek + sun_peek) / 2 if sat_peek and sun_peek else (sat_peek or sun_peek)
+    we_npeek = (sat_npeek + sun_npeek) / 2 if sat_npeek and sun_npeek else (sat_npeek or sun_npeek)
     start = hhmm(r["first_time"]) or hhmm(r["up_first"])
     end = hhmm(r["last_time"]) or hhmm(r["up_last"])
     routes[r["route_id"]] = {
-        "no": r["route_no"], "peek": peek, "npeek": npeek, "night": night,
+        "no": r["route_no"],
+        "wd": {"peek": peek, "npeek": npeek, "night": night},
+        "we": {"peek": we_peek, "npeek": we_npeek, "night": night},
         "start": 0 if start is None else start,
         "end": 24 * 60 if end is None else max(end, start or 0),
     }
 
 
-def trips(rt, h0, h1):
-    """이 노선이 [h0,h1) 시간대에 내는 운행횟수. 운행시간과 겹치는 만큼만 센다."""
+def trips(rt, h0, h1, dt):
+    """이 노선이 [h0,h1) 시간대·dt(wd/we)에 내는 운행횟수. 운행시간과 겹치는 만큼만 센다."""
     lo, hi = max(rt["start"], h0 * 60), min(rt["end"], h1 * 60)
     if hi <= lo:
         return 0.0                                   # 이 시간대엔 안 다님
+    a = rt[dt]
     if h0 >= 22 or h0 < 6:
-        headway = rt["night"] or rt["npeek"] or rt["peek"]
+        headway = a["night"] or a["npeek"] or a["peek"]
     elif h0 in (7, 17):
-        headway = rt["peek"] or rt["npeek"]
+        headway = a["peek"] or a["npeek"]
     else:
-        headway = rt["npeek"] or rt["peek"]
+        headway = a["npeek"] or a["peek"]
     return (hi - lo) / headway if headway else 0.0
 
 
-stop_freq = defaultdict(lambda: defaultdict(float))
+stop_freq = {dt: defaultdict(lambda: defaultdict(float)) for dt in DAYTYPES}
 stop_routes = defaultdict(set)
 linked = 0
 for l in read_plus("route_stops.csv"):
@@ -250,15 +261,17 @@ for l in read_plus("route_stops.csv"):
         continue
     linked += 1
     stop_routes[k].add(rt["no"])
-    for pid, h0, h1 in PERIODS:
-        stop_freq[k][pid] += trips(rt, h0, h1)
+    for dt in DAYTYPES:
+        for pid, h0, h1 in PERIODS:
+            stop_freq[dt][k][pid] += trips(rt, h0, h1, dt)
 
-have = len(stop_freq)
+have = len(stop_freq["wd"])
 print(f"  경유구간 {linked:,}건 결합 → 노선이 붙은 정류장 {have:,}/{len(stops):,} ({have / len(stops):.1%})")
-for pid, h0, h1 in PERIODS:
-    v = [stop_freq[k][pid] for k in stop_freq]
-    print(f"    {pid:5} ({h0:02d}-{h1:02d})  정류장당 평균 운행 {sum(v) / len(v):5.1f}회"
-          f" · 운행 0인 정류장 {sum(1 for x in v if x == 0):>4}개")
+for dt in DAYTYPES:
+    for pid, h0, h1 in PERIODS:
+        v = [stop_freq[dt][k][pid] for k in stop_freq[dt]]
+        print(f"    {dt}/{pid:5} ({h0:02d}-{h1:02d})  정류장당 평균 운행 {sum(v) / len(v):5.1f}회"
+              f" · 운행 0인 정류장 {sum(1 for x in v if x == 0):>4}개")
 
 print("=" * 66)
 print("[3] 격자 배정 · 커버리지 · 철도역")
@@ -325,15 +338,16 @@ for s in stops.values():
     s["alight_day"] = _median(amed[s["region"]])
 print(f"  승차량 결측 정류장 {board_imputed:,}개(노선·배차 실측인데 원본에 없음)를 읍면동 중앙값으로 대체")
 
-# [3] 결측 대체 — 같은 읍면동에서 노선이 붙은 정류장들의 중앙값
-med = defaultdict(lambda: defaultdict(list))
+# [3] 결측 대체 — 같은 읍면동에서 노선이 붙은 정류장들의 중앙값 (요일별로 각각)
+med = {dt: defaultdict(lambda: defaultdict(list)) for dt in DAYTYPES}
 for s in stops.values():
-    if s["key"] in stop_freq:
-        for pid, _, _ in PERIODS:
-            med[s["region"]][pid].append(stop_freq[s["key"]][pid])
+    if s["key"] in stop_freq["wd"]:                 # 붙어있는지 자체는 요일과 무관
+        for dt in DAYTYPES:
+            for pid, _, _ in PERIODS:
+                med[dt][s["region"]][pid].append(stop_freq[dt][s["key"]][pid])
 imputed = 0
 for s in stops.values():
-    if s["key"] in stop_freq:
+    if s["key"] in stop_freq["wd"]:
         s["freq_imputed"] = 0
         continue
     if s["board_day"] <= 0:
@@ -341,9 +355,10 @@ for s in stops.values():
         continue
     imputed += 1
     s["freq_imputed"] = 1
-    for pid, _, _ in PERIODS:
-        v = sorted(med[s["region"]][pid])
-        stop_freq[s["key"]][pid] = v[len(v) // 2] if v else 0.0
+    for dt in DAYTYPES:
+        for pid, _, _ in PERIODS:
+            v = sorted(med[dt][s["region"]][pid])
+            stop_freq[dt][s["key"]][pid] = v[len(v) // 2] if v else 0.0
 print(f"  노선 결측 정류장 {imputed:,}개를 읍면동 중앙값으로 대체")
 
 # 정류장 영향을 도보권 800m 안 격자들에 뿌린다.
@@ -362,10 +377,12 @@ gtree = STRtree([sgeom.Point(g["x"], g["y"]) for g in grid])
 
 # 승차량의 시간분포는 정류장이 속한 법정동의 OD 곡선을 따른다. 승차량과 같은
 # 가중치로 함께 쌓아, 두 동에 걸친 격자는 실제로 승객이 온 만큼 섞인 곡선을 받는다.
-OD_CITY_PS, OD_EMD_PS, ARS2EMD = od_shares()
-board_g = defaultdict(float)
-bshare_g = defaultdict(lambda: defaultdict(float))
-freq_g = defaultdict(lambda: defaultdict(float))
+# 요일축 — wd/we 각각의 OD 곡선으로 따로 계산한다. we 쪽 OD 를 안 돌린 팀원은
+# od_shares("we") 가 (None,{},...) 를 주므로 [4-1] 에서 유동인구 기준으로 조용히 빠진다.
+OD_PS = {dt: od_shares(dt) for dt in DAYTYPES}     # dt -> (city_ps, emd_ps, ars2emd)
+board_g = {dt: defaultdict(float) for dt in DAYTYPES}
+bshare_g = {dt: defaultdict(lambda: defaultdict(float)) for dt in DAYTYPES}
+freq_g = {dt: defaultdict(lambda: defaultdict(float)) for dt in DAYTYPES}
 lost = 0
 for s in slist:
     near = [(i, math.dist((s["x"], s["y"]), (grid[i]["x"], grid[i]["y"])))
@@ -376,15 +393,18 @@ for s in slist:
         near = [(i, min(d, WALK_M - 1))]
         lost += 1
     wsum = sum(1 - d / WALK_M for _, d in near) or 1.0
-    ps = OD_EMD_PS.get(ARS2EMD.get(s["ars"], ""), OD_CITY_PS) if OD_CITY_PS else None
-    for i, d in near:
-        w = (1 - d / WALK_M) / wsum
-        board_g[grid[i]["grid_id"]] += s["board_day"] * w
-        if ps:
+    for dt in DAYTYPES:
+        city_ps, emd_ps, ars2emd = OD_PS[dt]
+        ps = emd_ps.get(ars2emd.get(s["ars"], ""), city_ps) if city_ps else None
+        b = s["board_day"] if dt == "wd" else s["board_day_we"]
+        for i, d in near:
+            w = (1 - d / WALK_M) / wsum
+            board_g[dt][grid[i]["grid_id"]] += b * w
+            if ps:
+                for pid, _, _ in PERIODS:
+                    bshare_g[dt][grid[i]["grid_id"]][pid] += b * w * ps[pid]
             for pid, _, _ in PERIODS:
-                bshare_g[grid[i]["grid_id"]][pid] += s["board_day"] * w * ps[pid]
-        for pid, _, _ in PERIODS:
-            freq_g[grid[i]["grid_id"]][pid] += stop_freq[s["key"]][pid] * (1 - d / WALK_M)
+                freq_g[dt][grid[i]["grid_id"]][pid] += stop_freq[dt][s["key"]][pid] * (1 - d / WALK_M)
 if lost:
     print(f"  도보권에 격자 중심이 없어 최근접으로 보낸 정류장 {lost:,}개")
 
@@ -400,6 +420,7 @@ for g in grid:
     #                     정류장(292개, 9.2% · 대부분 승하차 0)을 가리키면 링크가 끊긴다.
     #
     # 그래서 거리는 전체에서, ID 는 ARS 가 있는 정류장 중에서 고른다.
+    # 이 블록은 daytype 과 무관하다 — 물리적 위치·거리는 요일이 안 바꾼다.
     if near:
         nearest_m = min(d for _, d in near)
     else:                                          # 도보권에 정류장이 없는 격자
@@ -412,33 +433,41 @@ for g in grid:
                  key=lambda t: t[1])[0])
     rail_m = min((math.dist((g["x"], g["y"]), r) for r in rails), default=None)
 
-    for pid, h0, h1 in PERIODS:
-        rows.append({
-            "grid_id": g["grid_id"], "period": pid,
-            # 일 승차를 시간대로 쪼갠다. 배율은 [4] 에서 연령가중으로 채운다.
-            "board_day": round(board_g[g["grid_id"]], 3),
-            "freq": round(freq_g[g["grid_id"]][pid], 3),
-            "coverage": round(coverage, 4),
-            "nearest_stop_id": f"{SIGUNGU}-{s_min['ars']}" if s_min["ars"] else "",
-            "nearest_stop_m": round(nearest_m, 1),
-            "rail_m": round(rail_m, 1) if rail_m else "",
-            "stops_n": len(near),
-        })
-print(f"  {len(grid):,}격자 × {len(PERIODS)}시간대 = {len(rows):,}행")
+    for dt in DAYTYPES:
+        for pid, h0, h1 in PERIODS:
+            rows.append({
+                "grid_id": g["grid_id"], "period": pid, "daytype": dt,
+                # 일 승차를 시간대로 쪼갠다. 배율은 [4] 에서 연령가중으로 채운다.
+                "board_day": round(board_g[dt][g["grid_id"]], 3),
+                "freq": round(freq_g[dt][g["grid_id"]][pid], 3),
+                "coverage": round(coverage, 4),
+                "nearest_stop_id": f"{SIGUNGU}-{s_min['ars']}" if s_min["ars"] else "",
+                "nearest_stop_m": round(nearest_m, 1),
+                "rail_m": round(rail_m, 1) if rail_m else "",
+                "stops_n": len(near),
+            })
+print(f"  {len(grid):,}격자 × {len(PERIODS)}시간대 × {len(DAYTYPES)}요일 = {len(rows):,}행")
 
 print("=" * 66)
-print("[4] 잠재수요 — 연령가중 시간배율")
-flow = defaultdict(float)
+print("[4] 잠재수요 — 연령가중 시간배율 (요일별)")
+# flow_hourly.csv 는 행마다 날짜(연도_월_일)가 있다 — [1]의 is_weekend() 를 그대로 써서
+# 승하차와 같은 방식으로 평일/주말을 가른다. 유동인구 자체가 2023-12~2024-01
+# 스냅샷이라 "최신"은 아니지만, 그 안에서도 요일 구분은 실측이다.
+flow = {dt: defaultdict(float) for dt in DAYTYPES}
 for x in read("flow_hourly.csv"):
     h = int(x["시간코드"])
+    dt = "we" if is_weekend(x.get("연도_월_일")) else "wd"
     for i, b in enumerate(FLOW_AGE):
         tag = b[1:]                                  # a2024 → 2024
-        flow[(b, h)] += num(x["남자" + tag + "수"]) + num(x["여자" + tag + "수"])
-day_tot = {b: sum(flow[(b, h)] for h in range(24)) or 1 for b in FLOW_AGE}
-share = {(b, pid): sum(flow[(b, h)] for h in range(h0, h1)) / day_tot[b]
-         for b in FLOW_AGE for pid, h0, h1 in PERIODS}
-for pid, _, _ in PERIODS:                            # a70p 는 6569 비율을 대용
-    share[("a70p", pid)] = share[("a6569", pid)]
+        flow[dt][(b, h)] += num(x["남자" + tag + "수"]) + num(x["여자" + tag + "수"])
+day_tot = {dt: {b: sum(flow[dt][(b, h)] for h in range(24)) or 1 for b in FLOW_AGE}
+           for dt in DAYTYPES}
+share = {dt: {(b, pid): sum(flow[dt][(b, h)] for h in range(h0, h1)) / day_tot[dt][b]
+              for b in FLOW_AGE for pid, h0, h1 in PERIODS}
+         for dt in DAYTYPES}
+for dt in DAYTYPES:
+    for pid, _, _ in PERIODS:                        # a70p 는 6569 비율을 대용
+        share[dt][("a70p", pid)] = share[dt][("a6569", pid)]
 
 by_grid = {g["grid_id"]: g for g in grid}
 
@@ -457,63 +486,67 @@ if filled:
 
 for r in rows:
     g = by_grid[r["grid_id"]]
-    pid = r["period"]
-    r["potential"] = round(sum(g[b] * share[(b, pid)] for b in AGE), 2)
+    pid, dt = r["period"], r["daytype"]
+    r["potential"] = round(sum(g[b] * share[dt][(b, pid)] for b in AGE), 2)
     # 연령가중 시간배율. 격자마다 연령 구성이 달라 값이 다르다.
     # ⚠️ 추정치다. API 응답에 isEstimated: true 로 표시해야 한다.
-    r["_pshare"] = sum(g[b] * share[(b, pid)] for b in AGE) / (g["pop"] or 1)
+    r["_pshare"] = sum(g[b] * share[dt][(b, pid)] for b in AGE) / (g["pop"] or 1)
     r["elderly_ratio"] = g["elderly_ratio"]
     r["workers"] = g["workers"]
     r["pop"] = g["pop"]
 
-# [4-1] 승차량의 시간분포는 교통카드 OD 실측을 그대로 쓴다.
+# [4-1] 승차량의 시간분포는 교통카드 OD 실측을 그대로 쓴다. (요일별로 각각 판단)
 #
 # 연령가중 유동인구 배율(_pshare)은 시간대별 승하차 원자료가 없던 시절의 대리
 # 지표였다. OD 는 그 타이밍을 동 단위로 직접 관측하므로 대리지표가 필요 없다 —
 # 관측값이 있는데 추정치를 곱할 이유가 없다. OD 표본이 없는 동(승차량 기준
 # 16.7%)만 시 전체 곡선으로 떨어지고, OD 자체가 없으면 예전 방식으로 돌아간다.
-if OD_CITY_PS:
-    covered = 0.0
-    for r in rows:
-        gid, pid = r["grid_id"], r["period"]
-        b = board_g[gid]
-        # 격자에 실제로 승차가 배분됐으면 그 격자가 받은 동별 곡선의 가중평균,
-        # 아니면(승차 0) 시 전체 곡선.
-        sh = (bshare_g[gid][pid] / b) if b > 0 else OD_CITY_PS[pid]
-        r["boardings"] = round(r["board_day"] * sh, 3)
-        if pid == "am" and b > 0:
-            covered += b
-    nd = sum(1 for e in OD_EMD_PS if e)
-    print(f"  [OD] 승차량 시간분포 = 교통카드 실측 (법정동 {nd}개 곡선 · 나머지는 시 전체)")
-    for pid, _, _ in PERIODS:
-        print(f"    {pid:6s} 시 전체 {OD_CITY_PS[pid] * 100:4.1f}%")
-else:
-    print("  [OD] od_quarter.csv 없음 — 승차량 시간배율은 유동인구 기준 그대로")
-    for r in rows:
-        r["boardings"] = round(r["board_day"] * r["_pshare"], 3)
+# wd/we 를 독립적으로 판단한다 — we OD 를 안 돌린 팀원도 wd 는 실측 그대로 쓰고
+# we 만 유동인구로 조용히 떨어진다(전부 아니면 전부 식이 아니다).
+for dt in DAYTYPES:
+    city_ps, emd_ps, _ = OD_PS[dt]
+    rs = [r for r in rows if r["daytype"] == dt]
+    if city_ps:
+        for r in rs:
+            gid, pid = r["grid_id"], r["period"]
+            b = board_g[dt][gid]
+            # 격자에 실제로 승차가 배분됐으면 그 격자가 받은 동별 곡선의 가중평균,
+            # 아니면(승차 0) 시 전체 곡선.
+            sh = (bshare_g[dt][gid][pid] / b) if b > 0 else city_ps[pid]
+            r["boardings"] = round(r["board_day"] * sh, 3)
+        nd = sum(1 for e in emd_ps if e)
+        print(f"  [OD:{dt}] 승차량 시간분포 = 교통카드 실측 (법정동 {nd}개 곡선 · 나머지는 시 전체)")
+        for pid, _, _ in PERIODS:
+            print(f"    {pid:6s} 시 전체 {city_ps[pid] * 100:4.1f}%")
+    else:
+        print(f"  [OD:{dt}] od_quarter_{dt}.csv 없음 — 승차량 시간배율은 유동인구 기준 그대로")
+        for r in rs:
+            r["boardings"] = round(r["board_day"] * r["_pshare"], 3)
 
-print("  시간대별 합 (연령가중 배율 적용)")
-for pid, h0, h1 in PERIODS:
-    p = sum(r["potential"] for r in rows if r["period"] == pid)
-    b = sum(r["boardings"] for r in rows if r["period"] == pid)
-    print(f"    {pid:5} ({h0:02d}-{h1:02d})  잠재 {p:>11,.0f}   승차 {b:>9,.0f}")
+for dt in DAYTYPES:
+    print(f"  시간대별 합 (연령가중 배율 적용, {dt})")
+    for pid, h0, h1 in PERIODS:
+        p = sum(r["potential"] for r in rows if r["period"] == pid and r["daytype"] == dt)
+        b = sum(r["boardings"] for r in rows if r["period"] == pid and r["daytype"] == dt)
+        print(f"    {pid:5} ({h0:02d}-{h1:02d})  잠재 {p:>11,.0f}   승차 {b:>9,.0f}")
 
 print("=" * 66)
 print("[5] 저장")
 with open(D / "stops_hwaseong.csv", "w", encoding="utf-8-sig", newline="") as f:
     cols = ["key", "stop_id", "ars", "name", "lon", "lat", "grid_id", "region",
             "board_day", "board_day_we", "alight_day", "board_imputed",
-            "n_routes", "freq_imputed"] + [f"freq_{p}" for p, _, _ in PERIODS]
+            "n_routes", "freq_imputed"] + [f"freq_{p}_{dt}" for dt in DAYTYPES for p, _, _ in PERIODS]
     w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for s in slist:
         w.writerow({**s, "stop_id": f"{SIGUNGU}-{s['ars']}" if s["ars"] else "",
-                    **{f"freq_{p}": round(stop_freq[s["key"]][p], 3) for p, _, _ in PERIODS}})
+                    **{f"freq_{p}_{dt}": round(stop_freq[dt][s["key"]][p], 3)
+                       for dt in DAYTYPES for p, _, _ in PERIODS}})
 print(f"  -> stops_hwaseong.csv  {len(slist):,}행")
 
 with open(D / "grid_join.csv", "w", encoding="utf-8-sig", newline="") as f:
-    cols = ["grid_id", "period", "boardings", "potential", "board_day", "freq", "coverage",
-            "nearest_stop_id", "nearest_stop_m", "rail_m", "stops_n",
+    cols = ["grid_id", "period", "daytype", "boardings", "potential", "board_day", "freq",
+            "coverage", "nearest_stop_id", "nearest_stop_m", "rail_m", "stops_n",
             "pop", "workers", "elderly_ratio"]
     w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
@@ -521,22 +554,28 @@ with open(D / "grid_join.csv", "w", encoding="utf-8-sig", newline="") as f:
 print(f"  -> grid_join.csv  {len(rows):,}행")
 
 print("=" * 66)
-print("[6] 검증")
-am = [r for r in rows if r["period"] == "am"]
-tot_b = sum(s["board_day"] for s in slist)
-alloc_b = sum(r["board_day"] for r in am)
-print(f"  일평균 승차 정류장 합 {tot_b:,.0f} → 격자 배분 합 {alloc_b:,.0f} ({alloc_b / tot_b:.1%})")
-print(f"  도보권에 정류장 없는 격자 {sum(1 for r in am if r['stops_n'] == 0):>4}개 / {len(am)}")
-print(f"  커버리지 중앙값 {sorted(r['coverage'] for r in am)[len(am) // 2]:.3f}")
-print("\n  시간대별 운행빈도 합 — 여기서 시간축이 나옵니다")
-base = None
-for pid, h0, h1 in PERIODS:
-    v = sum(r["freq"] for r in rows if r["period"] == pid)
-    base = base or v
-    print(f"    {pid:5} ({h0:02d}-{h1:02d})  {v:>10,.0f}  기준대비 {v / base:5.2f}배")
+print("[6] 검증 (요일별로 각각)")
+for dt in DAYTYPES:
+    rs = [r for r in rows if r["daytype"] == dt]
+    am = [r for r in rs if r["period"] == "am"]
+    tot_b = sum((s["board_day"] if dt == "wd" else s["board_day_we"]) for s in slist)
+    alloc_b = sum(r["board_day"] for r in am)
+    print(f"  [{dt}] 일평균 승차 정류장 합 {tot_b:,.0f} → 격자 배분 합 {alloc_b:,.0f}"
+          f" ({alloc_b / max(tot_b, 1):.1%})")
+    print(f"  [{dt}] 도보권에 정류장 없는 격자 {sum(1 for r in am if r['stops_n'] == 0):>4}개 / {len(am)}")
+    print(f"  [{dt}] 커버리지 중앙값 {sorted(r['coverage'] for r in am)[len(am) // 2]:.3f}")
+    print(f"  [{dt}] 시간대별 운행빈도 합 — 여기서 시간축이 나옵니다")
+    base = None
+    for pid, h0, h1 in PERIODS:
+        v = sum(r["freq"] for r in rs if r["period"] == pid)
+        base = base if base is not None else v
+        ratio = f"{v / base:5.2f}배" if base else "  n/a"
+        print(f"    {pid:5} ({h0:02d}-{h1:02d})  {v:>10,.0f}  기준대비 {ratio}")
 
-night = sum(r["freq"] for r in rows if r["period"] == "night")
-assert alloc_b / tot_b > 0.9, f"승차 배분 손실 {1 - alloc_b / tot_b:.1%} — 도보권 밖 정류장이 너무 많습니다"
-assert night < base * 0.6, "심야 운행빈도가 출근과 비슷합니다 — 배차 시간대 분기를 확인하세요"
-assert all(r["potential"] > 0 for r in am if r["pop"] > 0), "인구가 있는데 잠재수요가 0인 격자가 있습니다"
+    night = sum(r["freq"] for r in rs if r["period"] == "night")
+    assert alloc_b / max(tot_b, 1) > 0.9, \
+        f"[{dt}] 승차 배분 손실 {1 - alloc_b / max(tot_b, 1):.1%} — 도보권 밖 정류장이 너무 많습니다"
+    assert night < base * 0.6, f"[{dt}] 심야 운행빈도가 출근과 비슷합니다 — 배차 시간대 분기를 확인하세요"
+    assert all(r["potential"] > 0 for r in am if r["pop"] > 0), \
+        f"[{dt}] 인구가 있는데 잠재수요가 0인 격자가 있습니다"
 print("\n  ✅ 통과")
