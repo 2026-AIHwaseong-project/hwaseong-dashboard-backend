@@ -54,6 +54,20 @@ def init(DATA, COST_KRW, PERIODS, build_snapshot):
     _ctx.update(DATA=DATA, COST_KRW=COST_KRW, PERIODS=PERIODS, build_snapshot=build_snapshot)
 
 
+def _load_params_module():
+    """analysis/params.py 를 별도 모듈 객체로 로드 — 상수 정본.
+    (여기서 로드한 사본은 오버라이드를 굽기 전 기본값 참조용으로도 쓰므로
+    시뮬 엔진의 params 인스턴스와 별개다.)"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hw_params_admin", ROOT / "analysis" / "params.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+PARAMS = _load_params_module()
+
+
 # ─── 파라미터 레지스트리 ────────────────────────────────────────────────────────
 # scope: runtime  = 요청 시점에 읽혀 즉시 반영 (편집 가능)
 #        pipeline = 계약 JSON 에 구워짐 — 재계산 경로가 오버라이드를 읽는 P3 에서 개방
@@ -129,6 +143,19 @@ SPECS = {
                                  applies="사분면 적정/과잉 판정 — 재계산 필요"),
 }
 
+# 기본값 동기화 — SPECS 의 리터럴이 params.py 와 갈라지지 않게 정본에서 덮는다.
+_DEFAULT_SRC = {
+    "sim.headwayMult": PARAMS.HEADWAY_MULT,
+    **{f"sim.fstar.{p}": PARAMS.FSTAR[p] for p in PARAMS.PERIODS},
+    **{f"sim.phi.{p}": PARAMS.PHI[p] for p in PARAMS.PERIODS},
+    **{f"cost.{t}.krw": PARAMS.COST_TOTAL[t] for t in ("stop", "drt", "freq")},
+    "cost.defaultBudget": PARAMS.DEFAULT_BUDGET,
+    "model.busTripRate": PARAMS.BASE_VALUES["model.busTripRate"],
+    "model.minFreqPerHour": PARAMS.BASE_VALUES["model.minFreqPerHour"],
+}
+for _k, _v in _DEFAULT_SRC.items():
+    SPECS[_k]["default"] = _v
+
 # C계급 — 기준선에 구워진 상수. 표시 전용(살아있는 시뮬 모듈에서 읽는다).
 #   (attr, label, note)
 BASELINE_DISPLAY = [
@@ -195,6 +222,18 @@ def effective(key: str):
     if ov is not None:
         return ov["value"]
     return SPECS[key]["default"]
+
+
+def _pipeline_effective(key: str):
+    """pipeline 계급의 '실제 적용값' — 산출물(메모리 meta)에 구워진 값을 읽는다.
+    오버라이드를 저장해도 재계산 전에는 여기 값이 안 바뀐다(= 재계산 대기)."""
+    meta = (_ctx["DATA"] or {}).get("meta") or {}
+    a = meta.get("assumptions") or {}
+    if key == "model.busTripRate":
+        return (a.get("busTripRate") or {}).get("value")
+    if key == "model.minFreqPerHour":
+        return (a.get("minFreqPerHour") or {}).get("value")
+    return None
 
 
 # ─── 값 주입 — 서버 상수 + 시뮬 엔진 + meta 를 한 번에 ─────────────────────────
@@ -292,11 +331,13 @@ RELOAD_LOCK = asyncio.Lock()
 # 없으면 동시 저장 중 나중 쓰기가 먼저 쓴 키를 조용히 되돌린다(lost update).
 SAVE_LOCK = threading.Lock()
 
-_STEP_SCRIPT = {"join": "03_join.py", "model": "04_model.py", "load": "05_load.py"}
+_STEP_SCRIPT = {"join": "03_join.py", "model": "04_model.py",
+                "validate": "07_validate.py", "load": "05_load.py"}
 # 각 단계가 갱신하는 라이브 파일 — 스테이징 성공 후 이것만 원자 교체한다.
 _STEP_OUT = {
     "join": ["dataset_hwaseong/stops_hwaseong.csv", "dataset_hwaseong/grid_join.csv"],
     "model": ["dataset_hwaseong/grid_metrics.csv", "dataset_hwaseong/norm_stats.json"],
+    "validate": ["dataset_hwaseong/validation.json"],
 }
 
 
@@ -311,7 +352,9 @@ async def _run_script(script: Path, cwd: Path, label: str) -> None:
     proc = await asyncio.create_subprocess_exec(
         sys.executable, str(script), cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
+        env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
+             # 스테이징에서 돌아도 params.py 가 실제 오버라이드를 읽게 한다
+             "HW_VAR_DIR": str(VAR)})
     assert proc.stdout is not None
     while True:
         line = await proc.stdout.readline()
@@ -346,7 +389,7 @@ def _prune_dirs(pattern: str, keep: int) -> None:
 
 async def _run_refresh(steps: list, reason: str, actor: str) -> None:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    pipeline_steps = [s for s in ("join", "model", "load") if s in steps]
+    pipeline_steps = [s for s in ("join", "model", "validate", "load") if s in steps]
     stage = None
     try:
         before_kpi = (_ctx["DATA"].get("grid_am") or {}).get("kpi", {}).get("needCells")
@@ -430,6 +473,17 @@ async def _run_refresh(steps: list, reason: str, actor: str) -> None:
         _log("── 메모리 재적재")
         result = await _reload_data()
         result["needCellsAmBefore"] = before_kpi
+        result["paramsVersion"] = ((_ctx["DATA"].get("meta") or {}).get("paramsVersion"))
+        if "validate" in pipeline_steps:
+            try:
+                vj = json.loads((ROOT / "dataset_hwaseong" / "validation.json").read_text("utf-8"))
+                usable = vj.get("qualitativeUsable")
+                result["validation"] = {"qualitativeUsable": usable,
+                                        "cvLogR2": (vj.get("r2") or {}).get("cv_log")}
+                if isinstance(usable, (int, float)) and usable < 3:
+                    _log(f"⚠ 정성 대조 usable {usable}건 < 목표 3건 — 발표 인용 수치를 재확인하세요")
+            except Exception as e:
+                _log(f"validation.json 요약 실패(무시): {type(e).__name__}")
         JOB.update(status="done", result=result, finishedAt=_now(), step=None)
         _log(f"완료 — needCells(am) {before_kpi} → {result.get('needCellsAm')}")
         _append_history({"kind": "refresh.done", "jobId": JOB["id"], "ok": True,
@@ -450,14 +504,22 @@ def _param_rows() -> list:
     rows = []
     for key, s in SPECS.items():
         ov = raw.get(key)
-        editable = s["scope"] == "runtime"
+        editable = s["scope"] in ("runtime", "pipeline")
+        eff = effective(key)
+        pending = False
+        if s["scope"] == "pipeline":
+            live = _pipeline_effective(key)
+            if live is not None:
+                eff = live
+            pending = ov is not None and eff != ov["value"]
         rows.append({
             "key": key, "label": s["label"], "unit": s["unit"], "type": s["type"],
             "min": s["min"], "max": s["max"], "scope": s["scope"], "group": s["group"],
             "editable": editable, "requiresRefresh": s["scope"] == "pipeline",
             "default": s["default"],
             "override": ov["value"] if ov else None,
-            "effective": effective(key),
+            "effective": eff,
+            "pending": pending,
             "overridden": ov is not None,
             "reason": ov.get("reason") if ov else None,
             "actor": ov.get("actor") if ov else None,
@@ -503,9 +565,9 @@ def save_params(req: SaveRequest):
     unknown = [k for k in req.changes if k not in SPECS]
     if unknown:
         raise HTTPException(400, f"changes 에 알 수 없는 키가 있습니다: {unknown}")
-    locked = [k for k in req.changes if SPECS[k]["scope"] != "runtime"]
-    if locked:
-        raise HTTPException(400, f"재계산이 필요한 파라미터는 아직 화면에서 바꿀 수 없습니다: {locked}")
+    # pipeline 계급은 저장 가능하되 산출물 재계산([지표 재계산]) 전에는 화면에
+    # 반영되지 않는다 — 응답 requiresRefresh 로 알린다. baseline 계급은 SPECS 에
+    # 없어 아래 unknown 검사에서 자동 거부된다.
     normalized: dict = {}
     for k, v in req.changes.items():
         if v is None:                       # null = 기본값 복귀 (revoke)
@@ -551,8 +613,9 @@ def _save_locked(req: "SaveRequest", normalized: dict, reason: str):
                      "changes": applied})
     _write_override(current)
     apply_runtime_params()
+    needs = sorted({a["key"] for a in applied if SPECS[a["key"]]["scope"] == "pipeline"})
     return {"ok": True, "applied": applied, "overrideCount": len(current),
-            "params": _param_rows()}
+            "requiresRefresh": needs, "params": _param_rows()}
 
 
 class RefreshRequest(BaseModel):
@@ -565,7 +628,7 @@ class RefreshRequest(BaseModel):
 async def start_refresh(req: RefreshRequest):
     if JOB["status"] == "running":
         raise HTTPException(409, "이미 갱신이 진행 중입니다.")
-    valid = {"join", "model", "load", "db", "reload"}
+    valid = {"join", "model", "validate", "load", "db", "reload"}
     bad = [s for s in req.steps if s not in valid]
     if bad:
         raise HTTPException(400, f"steps 에 알 수 없는 단계가 있습니다: {bad} (허용: {sorted(valid)})")

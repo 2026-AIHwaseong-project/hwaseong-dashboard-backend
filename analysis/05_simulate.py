@@ -38,21 +38,14 @@ from sklearn.preprocessing import StandardScaler
 ROOT = Path(__file__).resolve().parent.parent
 D_DIR = ROOT / "dataset_hwaseong"
 
-PERIODS = ["am", "day", "pm", "night"]
-MI_TH = [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2]
-W_FREQ, W_COV, DAMP_EXP, MI_CLAMP, ELD = 0.78, 0.22, 0.65, 2.6, 1.6
-CUT = dict(need_zd=0.20, need_mi=0.75, over_zd=-0.30, over_zs=0.30,
-           drt_zd=-0.35, drt_zs=-0.35, ok_zd=0.25, ok_zs=0.25)
-WALK = 800.0       # 승하차 안분 반경 (03_join 설계와 일치)
-COVM = 600.0       # coverage 임계 (04_model 설계와 일치)
-MIN_FREQ_PER_H = 2.0                                        # 04_model [8] 절대 가드와 동일
-PERIOD_HOURS   = {"am": 2, "day": 8, "pm": 2, "night": 2}
-# FSTAR·PHI 는 '셀당'도 '면적당'도 아닌 **시설당** 주입량이다(가상정류장 1개,
-# DRT 1대). 미터 반경 거리감쇠로 뿌리므로 격자 크기를 바꿔도 값은 그대로 둔다.
-FSTAR = {"am": 4.8, "day": 8.0, "pm": 4.8, "night": 0.0}   # 신설 f* (회/창)
-PHI   = {"am": 2.4, "day": 9.6, "pm": 2.4, "night": 2.4}   # DRT φ (회/창)
-HEADWAY_MULT = 1.43   # 증편 배수 (headway × 0.7)
-COST = {"stop": 4.2e6, "drt": 1.8e8, "freq": 9.5e7}         # 연환산 원/년
+# 상수 정본은 params.py — 04_model 과 같은 값을 읽어야 기준선 assert 가 성립한다.
+# (QUAD 를 CUT 으로 그대로 쓴다. fref_q 키가 하나 더 있지만 키 접근만 하므로 무해)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from params import (PERIODS, PERIOD_HOURS, MIN_FREQ_PER_H,              # noqa: E402
+                    MI_THRESHOLDS as MI_TH, W_FREQ, W_COV, DAMP_EXP, MI_CLAMP,
+                    ELD_COEF as ELD, QUAD as CUT, WALK_M as WALK,
+                    COV_THRESHOLD_M as COVM, FSTAR, PHI, HEADWAY_MULT,
+                    COST_ANNUAL as COST, R_FINAL)
 
 # ---------- 데이터 적재 ----------
 gh   = pd.read_csv(D_DIR / "grid_hwaseong.csv")
@@ -247,9 +240,6 @@ def total_daily(mode, gi, count=1):
         nb += ev["n_bin"]
         nmi += ev["n_dmi"]
     return tB, tU, nb, nmi
-
-
-R_FINAL = {"stop": 800.0, "drt": 3000.0, "freq": 2200.0}
 
 
 def greedy(nsel=10, portfolio=False, dedup=True, verbose=True):
