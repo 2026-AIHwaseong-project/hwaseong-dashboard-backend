@@ -40,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db
+from . import admin
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -64,8 +65,11 @@ QUAD_LABEL = {
 }
 ACTION_LABEL = {"NEW_STOP": "신설", "ADD_FREQ": "증차", "DRT": "똑버스"}
 TYPE_LABEL = {"stop": "정류장 신설", "drt": "똑버스 배치", "freq": "배차 증편"}
-COST_KRW = {"stop": 42_000_000, "drt": 180_000_000, "freq": 95_000_000}
-RADIUS_KM = {"stop": 2.0, "drt": 3.0, "freq": 2.4}
+# 단가·반경 정본은 analysis/params.py (admin.PARAMS 로 1회 로드).
+# RADIUS_KM 은 시뮬 계산 반경 R_FINAL 의 km 파생 — 예전에는 표시 2.0km 대
+# 계산 800m 로 2.5배 어긋나 있었다.
+COST_KRW = dict(admin.PARAMS.COST_TOTAL)
+RADIUS_KM = {t: admin.PARAMS.radius_km(t) for t in ("stop", "drt", "freq")}
 STRAT_META = {
     "efficiency": {"label": "효율 최우선", "note": "사업비 1원당 해소 통행량이 가장 큰 순서로 고릅니다."},
     "equity":     {"label": "교통약자 우선", "note": "고령 잠재통행량 기준으로 개선 효과를 측정합니다."},
@@ -92,27 +96,50 @@ def _load_json() -> dict:
     return src
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def _build_data_snapshot() -> dict:
+    """디스크/DB → 완성된 DATA 스냅샷 한 벌.
+
+    lifespan 과 관리자 재적재(/api/v1/admin/refresh)가 같은 절차를 쓰도록 함수로
+    뽑았다. 시뮬 엔진은 매번 **새 모듈 객체**로 exec 한다 — importlib.reload() 는
+    스레드풀에서 진행 중인 /simulations 가 절반만 갱신된 모듈 전역을 볼 수 있어
+    쓰지 않는다(구 모듈은 진행 중 요청의 참조가 끊기면 GC 된다).
+    exec 중 기준선 assert 가 실패하면 여기서 예외가 나고, 호출자는 기존 DATA 를
+    건드리지 않았으므로 서빙은 이전 상태로 계속된다.
+    """
     # DATABASE_URL 이 있으면 DB(v_* 뷰)에서, 없거나 실패하면 JSON 에서 읽습니다.
     # 둘은 같은 것을 돌려줘야 합니다 — 확인은 python analysis/06_verify_db.py.
     # 아래 어느 쪽으로 왔든 DATA 의 모양이 같으므로 엔드포인트·시뮬레이션 엔진은
     # 자기가 무엇을 읽고 있는지 알 필요가 없습니다.
     src = db.load_all(QUAD_LABEL, ACTION_LABEL)
+    from_db = src is not None
     if src is None:
         src = _load_json()
         print("[server] 계약 JSON 에서 로드", flush=True)
-    DATA.update(src)
-    DATA["cells"] = {p: {c["id"]: c for c in DATA[f"grid_{p}"]["cells"]} for p in PERIODS}
+    src["cells"] = {p: {c["id"]: c for c in src[f"grid_{p}"]["cells"]} for p in PERIODS}
+    # 요일축 — grid_{p}_we 가 있으면(05_load.py 를 돌린 배포본) 주말 셀 인덱스도 나란히 둔다.
     for p in PERIODS:
-        if f"grid_{p}_we" in DATA:
-            DATA["cells"][f"{p}_we"] = {c["id"]: c for c in DATA[f"grid_{p}_we"]["cells"]}
+        if f"grid_{p}_we" in src:
+            src["cells"][f"{p}_we"] = {c["id"]: c for c in src[f"grid_{p}_we"]["cells"]}
 
-    spec = importlib.util.spec_from_file_location("hw_sim", ROOT / "analysis" / "05_simulate.py")
+    spec = importlib.util.spec_from_file_location(
+        f"hw_sim_{int(time.time() * 1000)}", ROOT / "analysis" / "05_simulate.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    DATA["sim"] = m
+    src["sim"] = m
+    src["_source"] = "db" if from_db else "json"
+    src["_loadedAt"] = datetime.now().isoformat(timespec="seconds")
+    return src
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    DATA.update(_build_data_snapshot())
     print("[server] 시뮬레이션 엔진 로드 완료", flush=True)
+    # 관리자 오버라이드 주입 — 반드시 스냅샷 적재 "직후". admin.apply_runtime_params 는
+    # COST_KRW·sim 모듈 속성·meta 를 한 번에 갱신한다 (server/admin.py 참고).
+    admin.init(DATA=DATA, COST_KRW=COST_KRW, PERIODS=PERIODS,
+               build_snapshot=_build_data_snapshot)
+    admin.apply_runtime_params()
     yield
 
 
@@ -144,6 +171,9 @@ app.add_middleware(
 # 시뮬레이션 응답(cellsByPeriod)이 1.5MB — JSON 이라 8~10배 압축됩니다.
 # 격자를 500m 로 세분화하면 4배가 더 커지므로 압축이 사실상 필수입니다.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# 관리자 콘솔 — ADMIN_TOKEN 미설정이면 전 라우트가 503 (기본 비활성).
+app.include_router(admin.router)
 
 # 프론트 폴백: fetch("/api/v1/…").catch(() => fetch("/data/grid_am.json"))
 #
@@ -488,7 +518,9 @@ def get_stop_profile(stop_id: str):
 class SimRequest(BaseModel):
     name: str = "시나리오"
     period: str = "am"
-    budgetKrw: int = 3_000_000_000
+    # None 이면 관리자 파라미터(cost.defaultBudget)로 보충한다 — 여기 리터럴을 두면
+    # 관리자가 기본 예산을 바꿔도 이 사본만 옛값으로 남는다.
+    budgetKrw: Optional[int] = None
     placements: list = []
 
 
@@ -528,6 +560,8 @@ def _validate_placements(sim, placements: list) -> list:
 @app.post("/api/v1/simulations")
 def run_simulation(req: SimRequest):
     _chk_period(req.period)
+    if req.budgetKrw is None:
+        req.budgetKrw = admin.effective("cost.defaultBudget")
     sim   = DATA["sim"]
     placements = _validate_placements(sim, req.placements)
     state = _apply_cumulative(sim, placements)
@@ -538,8 +572,9 @@ def run_simulation(req: SimRequest):
 class RecRequest(BaseModel):
     strategy: str = "efficiency"
     period: str = "am"
-    budgetKrw: int = 3_000_000_000
-    maxPlacements: int = 10
+    # None 이면 관리자 파라미터로 보충 (SimRequest.budgetKrw 와 같은 이유)
+    budgetKrw: Optional[int] = None
+    maxPlacements: Optional[int] = None
     allowedTypes: list = ["stop", "drt", "freq"]
     region: Optional[str] = None
     cellIds: Optional[list] = None   # 임의 영역(지도 드래그) — 후보를 이 격자로 제한
@@ -811,6 +846,10 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
 @app.post("/api/v1/recommendations")
 def run_recommendations(req: RecRequest):
     _chk_period(req.period)
+    if req.budgetKrw is None:
+        req.budgetKrw = admin.effective("cost.defaultBudget")
+    if req.maxPlacements is None:
+        req.maxPlacements = admin.effective("rec.maxPlacements")
     if req.strategy not in STRAT_META:
         raise HTTPException(400, f"strategy는 {list(STRAT_META)} 중 하나여야 합니다.")
     bad = [t for t in req.allowedTypes if t not in COST_KRW]

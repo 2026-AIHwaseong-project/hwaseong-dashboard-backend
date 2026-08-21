@@ -60,28 +60,19 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 D_DIR = ROOT / "dataset_hwaseong"
 
-PERIODS = ["am", "day", "pm", "night"]
-DAYTYPES = ["wd", "we"]    # 평일·주말. wd 산출물은 기존 파일명·키를 그대로 유지한다
-                           # (05_simulate.py·07_validate.py 가 고정 사용 — 계약을 안 바꾼다)
-MI_THRESHOLDS = [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2]
-COV_THRESHOLD_M = 600.0
-ALPHA_D = 0.5
-W_FREQ, W_COV = 0.78, 0.22
-DAMP_EXP = 0.65
-MI_CLAMP = 2.6
-ELD_COEF = 1.6
-QUAD = dict(need_zd=0.20, need_mi=0.75, over_zd=-0.30, over_zs=0.30,
-            drt_zd=-0.35, drt_zs=-0.35, ok_zd=0.25, ok_zs=0.25, fref_q=0.30)
+# 상수 정본은 params.py 다 — 04_model·05_simulate·05_load·server 가 같은 값을
+# 읽는다(사본 갈라짐 방지). 각 상수의 실측 근거 주석도 params.py 로 옮겼다.
+# 관리자 오버라이드(model.*)는 params 가 import 시점에 반영한다.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from params import (PERIODS, MI_THRESHOLDS, COV_THRESHOLD_M, ALPHA_D,   # noqa: E402
+                    W_FREQ, W_COV, DAMP_EXP, MI_CLAMP, ELD_COEF, QUAD,
+                    MIN_FREQ_PER_H, PERIOD_HOURS, BUS_TRIP_RATE)
+import params as _params                                                # noqa: E402
 
-# [8] over·ok 절대 가드. freq 는 시간대 창 전체의 운행횟수라 시간당으로 환산해서 잰다.
-MIN_FREQ_PER_H = 2.0
-PERIOD_HOURS = {"am": 2, "day": 8, "pm": 2, "night": 2}
-
-# 프론트 cells[].flowTripsPerDay 용. 전수단 원단위 2.5 × 버스 분담률 0.10.
-# ⚠️ 둘 다 가정값이다. 처음 2.5 만 곱했다가 사각지대 잠재수요가 132만 통행/일로
-#    나왔는데, 화성시 실제 버스 승차가 일 169,026 이라 8배였다. 전수단을 버스로
-#    착각한 것이었다. 사업비 단가와 같은 성격이라 화면에 가정임을 표시해야 한다.
-BUS_TRIP_RATE = 2.5 * 0.10
+# 요일축 — 관리자가 조정할 모델 튜닝값이 아니라 파이프라인 구조 상수라 params.py
+# 로는 안 옮긴다. wd 산출물은 기존 파일명·키를 그대로 유지한다
+# (05_simulate.py·07_validate.py 가 고정 사용 — 계약을 안 바꾼다)
+DAYTYPES = ["wd", "we"]
 
 
 def pctl(arr, q):
@@ -117,7 +108,8 @@ def main():
 
     # wd 는 기존 키·파일명을 그대로 쓴다("periods") — 05_simulate.py·07_validate.py 가
     # 이 계약을 고정으로 읽는다. we 는 새 키("periods_we")로 나란히 추가한다.
-    norm_stats = {"periods": {}, "periods_we": {}, "constants": {
+    norm_stats = {"paramsVersion": _params.params_version(),
+                  "periods": {}, "periods_we": {}, "constants": {
         "alphaD": ALPHA_D, "wFreq": W_FREQ, "wCov": W_COV, "dampExp": DAMP_EXP,
         "miClamp": MI_CLAMP, "covThresholdM": COV_THRESHOLD_M,
         "miThresholds": MI_THRESHOLDS, "elderlyCoef": ELD_COEF,
