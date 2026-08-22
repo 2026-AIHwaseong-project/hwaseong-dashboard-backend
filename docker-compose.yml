@@ -20,11 +20,18 @@ services:
       - ./var:/app/var
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/meta"]
+      # curl 을 쓰면 안 된다 — 베이스가 python:3.11-slim 이라 curl 이 없어서
+      # 헬스체크가 "구조적으로 항상 실패"했다(서비스는 멀쩡한데 컨테이너가
+      # 계속 unhealthy 로 찍혀, 진짜 장애를 알아볼 수 없는 상태였다).
+      # 이미지에 확실히 있는 파이썬으로 두드린다. 응답 본문은 읽지 않으므로
+      # meta 가 127KB 여도 헤더까지만 오간다. 4xx·5xx·연결 실패는 예외로
+      # 죽어 종료코드가 1 이 된다.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/meta', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s   # Poisson 회귀 로드 대기
+      start_period: 40s   # 시뮬 엔진 import(거리행렬·Poisson 회귀) 대기 — 실측 15~20초
 
   # Caddy — Cloudflare Pages(HTTPS 고정)가 이 API 를 부르려면 API 도 HTTPS 여야 한다.
   #   sslip.io 가 호스트명을 IP 로 풀어주고, Caddy 가 그 이름으로 Let's Encrypt
