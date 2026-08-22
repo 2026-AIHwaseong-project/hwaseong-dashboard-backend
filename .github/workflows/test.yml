@@ -1,0 +1,84 @@
+name: Test
+
+# 배포(deploy.yml)는 이 워크플로가 통과한 뒤에만 돌게 하는 것이 목적입니다.
+# deploy.yml 에 다음을 추가하세요:
+#
+#   on:
+#     workflow_run:
+#       workflows: ["Test"]
+#       branches: [main]
+#       types: [completed]
+#   jobs:
+#     deploy:
+#       if: github.event.workflow_run.conclusion == 'success'
+#
+# 지금은 push 마다 테스트 없이 EC2 로 나가므로, 계약이 깨져도 그대로 배포됩니다.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ① 파이프라인 단위 + ② API 통합 — 프론트 없이 백엔드만으로 돈다
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 의존성 설치
+        run: |
+          pip install -r requirements.txt
+          pip install pytest httpx
+      - name: ① 파이프라인 단위 테스트
+        run: python -m pytest tests/test_pipeline.py -q -m "not slow"
+      - name: ② API 통합 테스트
+        run: python -m pytest tests/test_api.py -q -m "not slow"
+
+  # 산출물 재현성 — 커밋된 계약 JSON 이 파이프라인 재실행 결과와 같은지
+  reproducibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt && pip install pytest
+      - name: 04_model.py 재실행 → 바이트 동일 확인
+        run: python -m pytest tests/test_pipeline.py -q -m slow
+
+  # ③ 브라우저 E2E — 프론트 저장소를 형제 폴더로 체크아웃해 /app 서빙
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: hwaseong-dashboard-backend
+      - uses: actions/checkout@v4
+        with:
+          repository: 2026-AIHwaseong-project/hwaseong-dashboard
+          path: hwaseong-dashboard
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 의존성 설치
+        working-directory: hwaseong-dashboard-backend
+        run: |
+          pip install -r requirements.txt
+          pip install pytest playwright
+          playwright install --with-deps chromium
+      - name: ③ E2E
+        working-directory: hwaseong-dashboard-backend
+        run: python -m pytest tests/test_e2e.py -q -m e2e
+      - name: 실패 시 스크린샷 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: hwaseong-dashboard-backend/test-results/
+          if-no-files-found: ignore
