@@ -1080,6 +1080,7 @@ DB 는 그 옆에 붙습니다: `server/static/*.json` → `06_load_db.py` → `
 |---|---|
 | [docs/API_SPEC.md](docs/API_SPEC.md) | 엔드포인트 10개 명세 · 응답 예시 **(정본)** |
 | [docs/REPORT_PIPELINE_PLAN.md](docs/REPORT_PIPELINE_PLAN.md) | AI 보고서 생성 경로 보강 계획 (미착수) |
+| [docs/ADMIN_UPLOAD_PLAN.md](docs/ADMIN_UPLOAD_PLAN.md) | 관리자 콘솔 CSV 업로드 계획 · 선행 결함 2건 포함 (미착수) |
 
 데이터 파일 목록은 문서로 두지 않습니다 — `git ls-files dataset_hwaseong` 를 보세요(§8).
 프론트 렌더링 계약과 설계 근거는 프론트 저장소

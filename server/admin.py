@@ -380,7 +380,11 @@ _STEP_SCRIPT = {"join": "03_join.py", "model": "04_model.py",
 # 각 단계가 갱신하는 라이브 파일 — 스테이징 성공 후 이것만 원자 교체한다.
 _STEP_OUT = {
     "join": ["dataset_hwaseong/stops_hwaseong.csv", "dataset_hwaseong/grid_join.csv"],
-    "model": ["dataset_hwaseong/grid_metrics.csv", "dataset_hwaseong/norm_stats.json"],
+    # grid_metrics_we.csv 를 빼면 라이브가 "새 기준선 + 옛 주말 지표" 혼합이 되고
+    # 05_simulate.py 의 `[we] 기준선 불일치` assert 로 서버가 못 뜬다(크래시 루프).
+    # 04_model.py 가 쓰는 산출물과 이 목록이 어긋나지 않는지 tests 가 검사한다.
+    "model": ["dataset_hwaseong/grid_metrics.csv", "dataset_hwaseong/grid_metrics_we.csv",
+              "dataset_hwaseong/norm_stats.json"],
     "validate": ["dataset_hwaseong/validation.json"],
 }
 
@@ -485,8 +489,33 @@ async def _run_refresh(steps: list, reason: str, actor: str) -> None:
             for s in pipeline_steps:
                 swap += _STEP_OUT.get(s, [])
             if "load" in pipeline_steps:
-                swap += [f"server/static/{p.name}"
-                         for p in (stage / "server" / "static").glob("*.json")]
+                stage_static = {p.name for p in (stage / "server" / "static").glob("*.json")}
+                live_static = {p.name for p in (ROOT / "server" / "static").glob("*.json")}
+                # 05_load 는 주말 입력이 없으면 *_we.json 을 print 만 하고 건너뛴 채
+                # 종료코드 0 으로 끝난다. 그대로 교체하면 화면이 평일=새것 / 주말=옛것으로
+                # 조용히 갈린다 — 빠진 게 있으면 아예 교체하지 않는다.
+                missing = live_static - stage_static
+                if missing:
+                    raise RuntimeError(
+                        f"스테이지에 계약 JSON {len(missing)}개가 없습니다"
+                        f"({', '.join(sorted(missing)[:5])}) — 세대가 갈리므로 교체하지 않습니다")
+                swap += [f"server/static/{n}" for n in sorted(stage_static)]
+
+            # 교체 도중 디스크가 차면 앞쪽만 새것이 되어 세대 불일치로 서버가 못 뜬다.
+            # 백업본과 .new 임시본까지 감안해 넉넉히 잡고, 모자라면 **교체를 시작하기
+            # 전에** 멈춘다(라이브 무변경).
+            need = sum((stage / rel).stat().st_size for rel in swap if (stage / rel).exists())
+            free = shutil.disk_usage(ROOT).free
+            if free < need * 3:
+                raise RuntimeError(
+                    f"디스크 여유 부족 — 약 {need * 3 // 1048576}MB 필요, 현재 "
+                    f"{free // 1048576}MB. 교체를 시작하지 않았습니다(라이브 무변경)")
+
+            # 이전 실패가 남긴 .new 고아 정리 — 남겨두면 이후 copytree 마다 얹힌다.
+            for _d in (ROOT / "dataset_hwaseong", ROOT / "server" / "static"):
+                for _orphan in _d.glob("*.new"):
+                    _orphan.unlink(missing_ok=True)
+
             backup = VAR / f"backup-{ts}"
             backup.mkdir(parents=True, exist_ok=True)
             for rel in swap:
@@ -496,14 +525,37 @@ async def _run_refresh(steps: list, reason: str, actor: str) -> None:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(live, dst)
             _log(f"백업 {len(swap)}개 → {backup}")
-            for rel in swap:
-                # stage(var/, 도커에선 바인드 마운트)와 ROOT 는 다른 파일시스템일 수
-                # 있어 os.replace 직행은 EXDEV 로 죽는다. 목적지와 같은 디렉토리에
-                # .new 로 복사한 뒤 replace — 원자성은 목적지 fs 안에서 성립한다.
-                live = ROOT / rel
-                tmp = live.with_name(live.name + ".new")
-                shutil.copy2(stage / rel, tmp)
-                os.replace(tmp, live)
+
+            # 파일 하나하나는 원자적이지만 **집합 전체는 아니다.** 중간에 죽으면 앞쪽만
+            # 새것이 되어 05_simulate 의 기준선 assert 로 서버가 못 뜬다 — 이미 바꾼
+            # 것만 백업에서 되돌려 라이브를 한 세대로 유지한다.
+            done_rel: list = []
+            try:
+                for rel in swap:
+                    # stage(var/, 도커에선 바인드 마운트)와 ROOT 는 다른 파일시스템일 수
+                    # 있어 os.replace 직행은 EXDEV 로 죽는다. 목적지와 같은 디렉토리에
+                    # .new 로 복사한 뒤 replace — 원자성은 목적지 fs 안에서 성립한다.
+                    live = ROOT / rel
+                    tmp = live.with_name(live.name + ".new")
+                    shutil.copy2(stage / rel, tmp)
+                    os.replace(tmp, live)
+                    done_rel.append(rel)
+            except Exception as e:
+                _log(f"⚠ 교체 실패({type(e).__name__}) — {len(done_rel)}개 되돌리는 중")
+                for rel in reversed(done_rel):
+                    live = ROOT / rel
+                    src = backup / rel
+                    try:
+                        if src.exists():
+                            tmp = live.with_name(live.name + ".rb")
+                            shutil.copy2(src, tmp)
+                            os.replace(tmp, live)
+                        else:
+                            live.unlink(missing_ok=True)   # 교체 전 라이브에 없던 파일
+                    except Exception as re:
+                        _log(f"⚠ {rel} 되돌리기 실패: {type(re).__name__}: {re}")
+                _log("되돌리기 완료 — 라이브는 교체 전 상태입니다")
+                raise RuntimeError(f"원자 교체 실패, 되돌렸습니다: {type(e).__name__}: {e}")
             _log(f"원자 교체 {len(swap)}개 완료")
 
         # DB 재적재 — 명시 요청("db")했거나, DB 모드에서 계약 JSON 을 새로
