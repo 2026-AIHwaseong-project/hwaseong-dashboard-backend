@@ -1,0 +1,34 @@
+# 이미지에 넣지 않을 것.
+#
+# ⚠️ dataset_hwaseong/ 은 절대 제외하지 말 것 — analysis/05_simulate.py 가
+#    import 시점에 CSV 5개를 직독하므로, 빼면 컨테이너에서 시뮬레이션 엔진이
+#    기동조차 못 한다.
+
+# 인증키. 이게 이미지에 들어가면 두 가지 사고가 난다.
+#   1) 이미지를 공유·저장하는 순간 AI 키·관리자 토큰이 함께 나간다.
+#   2) server/main.py 의 load_dotenv 가 **이미지 안의 낡은 .env** 를 읽어,
+#      호스트 .env 를 고치고 재기동해도 값이 안 바뀐다(재빌드해야만 반영).
+#      제외해 두면 compose 의 env_file 주입만 유효해져 up -d 로 바로 반영된다.
+.env
+.env.local
+.env.bak*
+
+# 관리자 콘솔 산출(오버라이드·이력·스테이징·백업) — 볼륨으로 마운트한다.
+var/
+
+# 이력·캐시
+.git/
+.github/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 전국 원본(372MB) — 화성시 추출본만 이미지에 들어간다.
+dataset/
+
+# 문서·에디터
+.vscode/
+.idea/
+.DS_Store

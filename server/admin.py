@@ -14,7 +14,10 @@
     부른다 — 새로 import 된 시뮬 모듈은 기본값으로 돌아가 있기 때문이다.
 
 인증: ADMIN_TOKEN 환경변수 + Authorization: Bearer.
-  미설정이면 admin 전체가 503 — 공개 배포에 코드가 먼저 나가도 공격면이 늘지 않는다.
+  ⚠️ 토큰이 **비어 있으면 인증 없이 열린다**(내부망·단일 운영자 전제의 기본값).
+     공개 인터넷에 노출된 서버라면 반드시 ADMIN_TOKEN 을 설정할 것 — 없으면
+     누구나 단가·모델 상수를 바꾸고 재계산을 트리거할 수 있다(workers=1 이라
+     재계산 반복만으로 전 API 가 멎는다). 기동 로그와 화면 배너로 경고한다.
   실패 잠금은 전역 카운터다. IP별 잠금은 행사장 NAT 오차단으로 롤백된 전례가 있다
   (main.py 의 레이트리밋 이력 참고).
 
@@ -289,11 +292,24 @@ def apply_runtime_params() -> dict:
 _AUTH = {"fail": 0, "locked_until": 0.0, "logged": 0}
 
 
+def auth_required() -> bool:
+    return bool(os.environ.get("ADMIN_TOKEN", ""))
+
+
+def warn_if_open() -> None:
+    """기동 시 1회 — 무인증 상태를 조용히 넘기지 않는다(db.py 의 문화)."""
+    if not auth_required():
+        print("[admin] ⚠ ADMIN_TOKEN 미설정 — 관리자 콘솔이 인증 없이 열려 있습니다. "
+              "공개 서버라면 .env 에 ADMIN_TOKEN 을 설정하세요.", file=sys.stderr, flush=True)
+    else:
+        print("[admin] 관리자 콘솔 토큰 인증 활성", flush=True)
+
+
 async def require_admin(authorization: str = Header(default=""),
                         x_forwarded_for: str = Header(default="")):
     token = os.environ.get("ADMIN_TOKEN", "")
     if not token:
-        raise HTTPException(503, "관리자 기능이 비활성화되어 있습니다. 서버 .env 에 ADMIN_TOKEN 을 설정하세요.")
+        return True   # 무인증 모드 — 위 docstring 의 경고 참고
     given = authorization[7:].strip() if authorization.startswith("Bearer ") else authorization.strip()
     # 정답 토큰은 잠금 중에도 통과한다 — 잠금은 브루트포스 지연 장치이지 정당한
     # 관리자를 봉쇄하는 장치가 아니다. (구버전 토큰을 든 탭의 폴링이 잠금을
@@ -668,7 +684,8 @@ def get_status():
                 "finishedAt": JOB["finishedAt"], "error": JOB["error"],
                 "result": JOB["result"], "logTail": list(JOB["log"])[-40:]},
         "env": {"dbConfigured": bool(os.environ.get("DATABASE_URL")),
-                "varDirWritable": writable},
+                "varDirWritable": writable,
+                "authRequired": auth_required()},
     }
 
 

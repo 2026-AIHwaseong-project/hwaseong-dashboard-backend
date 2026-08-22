@@ -129,6 +129,7 @@ async def lifespan(app: FastAPI):
     admin.init(DATA=DATA, COST_KRW=COST_KRW, PERIODS=PERIODS,
                build_snapshot=_build_data_snapshot)
     admin.apply_runtime_params()
+    admin.warn_if_open()
     yield
 
 
