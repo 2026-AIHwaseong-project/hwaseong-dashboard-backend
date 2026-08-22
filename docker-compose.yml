@@ -10,6 +10,9 @@ services:
       # 비어 있으면 server/db.py 가 곧장 계약 JSON 으로 갑니다 — 기본 동작은
       # DB 를 붙이기 전과 완전히 같습니다(경고도 안 찍힙니다).
       - DATABASE_URL=${DATABASE_URL:-}
+      # 관리자 콘솔 인증. .env 에 적어도 되고 셸 변수로 덮어써도 된다.
+      # 비어 있으면 콘솔이 인증 없이 열린다(내부망 전제) — 공개 서버면 반드시 설정.
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
     volumes:
       # 관리자 오버라이드·이력·재계산 산출이 여기 쌓인다. 마운트가 없으면
       # 컨테이너 쓰기 레이어에만 남아 다음 deploy(git pull + --build)에서
