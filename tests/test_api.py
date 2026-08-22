@@ -38,7 +38,9 @@ def _fake_acall(text, seen=None):
     seen 을 주면 실제로 넘어간 프롬프트 길이를 기록한다."""
     async def fake(provider, model, system, messages, **kw):
         if seen is not None:
-            seen["n"] = len(system or "") + sum(len(m.get("content", "")) for m in messages)
+            joined = (system or "") + "".join(m.get("content", "") for m in messages)
+            seen["n"] = len(joined)
+            seen["text"] = joined
         return text, provider, model
     return fake
 
@@ -431,3 +433,147 @@ def test_simulation_monotonic_in_placements(c):
         cur = j["effectiveness"]["resolvedTripsPerDay"]
         assert cur >= prev, f"{k}건에서 감소: {prev} → {cur}"
         prev = cur
+
+
+# ══════════════════════════════════════════════════════════════
+# H. 보고서 출력 계약 — 서버가 모델 출력을 검증하는가
+#    (docs/REPORT_PIPELINE_PLAN.md 의 6단계에 대응)
+# ══════════════════════════════════════════════════════════════
+SIX = ["summary", "status", "problem", "plan", "effect", "next"]
+
+BROKEN_DRAFT = {
+    "title": "보고서",
+    "sections": [
+        {"key": "summary", "heading": "검토 개요", "body": "수요가 많다.", "bullets": []},
+        {"key": "made_up", "heading": "7. 없는 장", "body": "지어낸 장.", "bullets": []},
+        {"key": "plan", "heading": "개선", "body": "고친다.", "bullets": []},
+    ],
+    "tables": [{
+        "key": "priority",
+        "title": "노선 조정 우선순위 및 연차별 투자계획 상세 검토표(2026~2030)",   # 39자
+        "columns": ["순위", "격자", "조치"],
+        "rows": [[1, "다사6707"], [2, "다사4814", "똑버스", "군더더기"]],
+    }],
+    "disclaimer": "x",
+}
+
+
+@pytest.fixture
+def ai_draft(monkeypatch):
+    """AI 가 준 것처럼 임의의 초안을 돌려주게 만드는 헬퍼."""
+    import server.main as sm
+
+    def _use(payload):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        monkeypatch.setattr(sm, "_acall_ai", _fake_acall(text))
+    return _use
+
+
+def test_draft_sections_forced_to_requested_keys(c, ai_draft):
+    """요청한 key 만 남고, 없는 key 는 버려야 한다."""
+    ai_draft(BROKEN_DRAFT)
+    d = c.post("/api/v1/reports/draft",
+               json={"period": "am", "provider": "claude", "sections": SIX}).json()
+    keys = [s["key"] for s in d["sections"]]
+    assert "made_up" not in keys, f"요청에 없는 key 가 살아남음: {keys}"
+    assert keys == ["summary", "plan"], keys
+
+
+def test_draft_headings_are_numbered(c, ai_draft):
+    """heading 번호는 서버가 매긴다 — 모델이 빼먹어도 한글 문서에 번호가 붙는다."""
+    ai_draft(BROKEN_DRAFT)
+    d = c.post("/api/v1/reports/draft",
+               json={"period": "am", "provider": "claude", "sections": SIX}).json()
+    headings = [s["heading"] for s in d["sections"]]
+    assert headings == ["1. 검토 개요", "2. 개선 방안"], headings
+
+
+def test_draft_table_title_truncated(c, ai_draft):
+    """엑셀 시트명 31자. 넘으면 프론트가 조용히 자르고 (2) 를 붙인다."""
+    ai_draft(BROKEN_DRAFT)
+    d = c.post("/api/v1/reports/draft",
+               json={"period": "am", "provider": "claude", "sections": SIX}).json()
+    for t in d["tables"]:
+        assert len(t["title"]) <= 31, f"{len(t['title'])}자: {t['title']}"
+
+
+def test_draft_table_rows_match_columns(c, ai_draft):
+    """RTF 는 초과 칸을 버리고 XLSX 는 다음 열에 쓴다 — 서버가 길이를 맞춰야 둘이 같아진다."""
+    ai_draft(BROKEN_DRAFT)
+    d = c.post("/api/v1/reports/draft",
+               json={"period": "am", "provider": "claude", "sections": SIX}).json()
+    for t in d["tables"]:
+        width = len(t["columns"])
+        assert all(len(r) == width for r in t["rows"]), \
+            f"행 길이 {[len(r) for r in t['rows']]} vs columns {width}"
+
+
+def test_truncated_json_falls_back_not_empty(c, ai_draft):
+    """잘린 응답에 빈 문서를 내보내면 제목만 있는 보고서가 결재로 올라간다."""
+    ai_draft('{"title":"보고서","sections":[{"key":"summary","heading":"1. 검토 개요","body":"본문이 여기서 잘')
+    d = c.post("/api/v1/reports/draft",
+               json={"period": "am", "provider": "claude", "sections": SIX}).json()
+    assert d["sections"], "빈 문서가 나갔다"
+    assert d.get("isAiGenerated") is False
+    assert "잘렸" in d["disclaimer"], d["disclaimer"]
+
+
+def test_fallback_has_six_sections(c, monkeypatch):
+    """폴백도 계약과 같은 6장이어야 한다 — 키가 죽어도 목차가 바뀌면 안 된다."""
+    for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
+              "OPENROUTER_API_KEY", "AI_PROVIDER"):
+        monkeypatch.delenv(k, raising=False)
+    d = c.post("/api/v1/reports/draft", json={"period": "am", "sections": SIX}).json()
+    assert [s["key"] for s in d["sections"]] == SIX
+    assert [s["heading"][:2] for s in d["sections"]] == [f"{i}." for i in range(1, 7)]
+    assert all(s["body"].strip() for s in d["sections"]), "본문이 빈 섹션이 있다"
+
+
+def test_chat_rejects_shrunken_draft(c, monkeypatch):
+    """모델이 고친 한 장만 돌려주면 나머지가 사라진다 — 줄어든 초안은 반영하지 않는다."""
+    import server.main as sm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+    monkeypatch.setattr(sm, "_acall_ai", _fake_acall(json.dumps({
+        "reply": "1장만 고쳤습니다.", "action": {"type": "none"},
+        "draft": {"sections": [{"key": "summary", "heading": "1. 검토 개요", "body": "고친 본문"}]},
+    }, ensure_ascii=False)))
+    base = {"sections": [{"key": k, "heading": f"{i}. x", "body": "y"}
+                         for i, k in enumerate(SIX, 1)]}
+    j = c.post("/api/v1/chat", json={
+        "mode": "report", "provider": "claude", "draft": base,
+        "messages": [{"role": "user", "content": "1장만 고쳐줘"}]}).json()
+    assert "draft" not in j, "줄어든 초안이 그대로 반영됐다"
+    assert j.get("draftRejected") == "sections_shrank"
+    assert j["reply"], "reply 는 그대로 나가야 한다"
+
+
+def test_chat_accepts_full_draft(c, monkeypatch):
+    """전체를 돌려주면 정상 반영되어야 한다 (가드가 과하게 걸리지 않는지)."""
+    import server.main as sm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+    full = {"sections": [{"key": k, "heading": f"{i}. x", "body": "고친 본문"}
+                         for i, k in enumerate(SIX, 1)]}
+    monkeypatch.setattr(sm, "_acall_ai", _fake_acall(json.dumps({
+        "reply": "전체를 고쳤습니다.", "action": {"type": "none"}, "draft": full},
+        ensure_ascii=False)))
+    base = {"sections": [{"key": k, "heading": f"{i}. x", "body": "y"}
+                         for i, k in enumerate(SIX, 1)]}
+    j = c.post("/api/v1/chat", json={
+        "mode": "report", "provider": "claude", "draft": base,
+        "messages": [{"role": "user", "content": "전체 고쳐줘"}]}).json()
+    assert len(j["draft"]["sections"]) == 6
+
+
+def test_prompt_has_no_dead_avgmi_and_forbids_invented_numbers(c, monkeypatch):
+    """avgMi 는 KPI 에서 지운 필드다. 프롬프트에 남아 있으면 '미제공'이 매번 실린다."""
+    import server.main as sm
+    seen = {}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+    monkeypatch.setattr(sm, "_acall_ai",
+                        _fake_acall(json.dumps({"sections": [], "tables": []}), seen))
+    c.post("/api/v1/reports/draft",
+           json={"period": "am", "provider": "claude", "sections": SIX})
+    prompt = seen["text"]
+    assert "avgMi" not in prompt and "평균 MI" not in prompt, "죽은 avgMi 줄이 남아 있다"
+    assert "없는 수치는 어떤 경우에도 쓰지 마십시오" in prompt, "수치 금지 문장이 없다"

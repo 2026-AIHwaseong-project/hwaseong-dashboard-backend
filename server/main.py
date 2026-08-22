@@ -1165,6 +1165,84 @@ def _resolve_model(provider: str, requested: Optional[str]) -> str:
     return requested
 
 
+# 섹션 이름은 **서버가 정본을 쥔다.** 모델이 지어내게 두면 번호가 빠지거나
+# ("검토 개요") 없는 장이 붙는다("7. 없는 장") — heading 문자열은 프론트가 손대지 않고
+# RTF·XLSX·미리보기 세 경로로 그대로 나가므로, 한글 문서에 번호 없는 소제목이 실린다.
+REPORT_SECTION_NAMES = {
+    "summary": "검토 개요",
+    "status":  "현황 분석",
+    "problem": "도출된 문제점",
+    "plan":    "개선 방안",
+    "effect":  "기대 효과",
+    "next":    "향후 조치 계획",
+}
+XLSX_SHEET_NAME_MAX = 31   # 엑셀 시트명 상한. 넘으면 프론트가 조용히 자르고 (2) 를 붙인다.
+
+
+def _validate_draft(draft: dict, req_sections: list) -> dict:
+    """모델이 낸 초안을 계약에 맞춘다. **이 함수가 없으면 아무 검증도 없다.**
+
+    실측: _acall_ai 를 대역으로 바꿔 규격 위반 응답을 넣어 보니 전부 그대로 통과했다.
+      · 섹션 2개(요청은 6개) · heading "검토 개요"(번호 없음) · 요청에 없는 key
+      · 표 제목 39자 · columns 3개인데 행이 2칸·4칸
+
+    셋 다 조용히 틀리는 종류다. 표 행 길이는 특히 나쁜데, RTF 는 초과 칸을 버리고
+    (report.js 의 rtfTable 이 columns 길이만큼만 순회) XLSX 는 헤더 없는 다음 열에
+    쓴다(draftToSheets 가 행을 그대로 map). **같은 초안에서 두 파일의 표가 달라진다.**
+    여기서 길이를 맞추면 양쪽이 자동으로 같아진다.
+
+    heading 은 요청한 섹션 순서대로 1 부터 다시 매긴다 — 일부 섹션만 요청해도
+    번호가 비지 않는다.
+    """
+    sections = draft.get("sections")
+    if isinstance(sections, list):
+        got = {sec.get("key"): sec for sec in sections
+               if isinstance(sec, dict) and sec.get("key") in REPORT_SECTION_NAMES}
+        kept = [k for k in req_sections if k in got]
+        draft["sections"] = [
+            {**got[k], "key": k, "heading": f"{i}. {REPORT_SECTION_NAMES[k]}"}
+            for i, k in enumerate(kept, 1)
+        ]
+
+    tables = draft.get("tables")
+    if isinstance(tables, list):
+        fixed = []
+        for t in tables:
+            if not isinstance(t, dict):
+                continue
+            t["title"] = str(t.get("title", ""))[:XLSX_SHEET_NAME_MAX]
+            cols = t.get("columns") if isinstance(t.get("columns"), list) else []
+            t["columns"] = cols
+            width = len(cols)
+            rows = t.get("rows") if isinstance(t.get("rows"), list) else []
+            t["rows"] = [(list(r) + [""] * width)[:width] if isinstance(r, list) else [""] * width
+                         for r in rows]
+            fixed.append(t)
+        draft["tables"] = fixed
+    return draft
+
+
+def _looks_truncated(text: str) -> bool:
+    """max_tokens 에서 잘린 응답인가.
+
+    스트리밍으로 조각을 모으는 구조라 stop_reason 이 여기까지 올라오지 않는다.
+    대신 중괄호가 닫히지 않은 채 끝났는지로 판정한다 — 잘린 JSON 의 실제 모양이다.
+    4096 에서 잘려 파싱이 깨진 적이 있어 8192 로 올렸지만, 표가 길어지면 같은 일이
+    반복된다. 그때 "JSON 파싱 실패" 로만 보이면 원인을 못 찾는다.
+    """
+    depth, in_str, esc = 0, False, False
+    for ch in text:
+        if in_str:
+            if esc:            esc = False
+            elif ch == "\\":   esc = True
+            elif ch == '"':    in_str = False
+            continue
+        if ch == '"':   in_str = True
+        elif ch == "{": depth += 1
+        elif ch == "}": depth -= 1
+    return depth > 0 or in_str
+
+
 def _fallback_report(period: str, kpi: dict, priorities: list, daytype: str = "wd") -> dict:
     """AI 키가 없을 때 쓰는 규칙 기반 초안.
 
@@ -1188,6 +1266,10 @@ def _fallback_report(period: str, kpi: dict, priorities: list, daytype: str = "w
         "provider": "규칙 기반 초안 (AI 미사용)", "model": None,
         "isAiGenerated": False,
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        # 계약과 **같은 6장**을 낸다. 예전에는 2장(summary·priority)뿐이라,
+        # 키가 죽으면 6장짜리 결재 문서가 2장으로 바뀌었다 — 폴백의 목적이
+        # "버튼이 안 깨지게" 라면 문서의 뼈대도 같아야 목적이 완성된다.
+        # 문장은 지어내지 않는다. 산출된 수치를 틀에 끼울 뿐이다.
         "sections": [
             {"key": "summary", "heading": "1. 검토 개요",
              "body": f"{dn} {pn} 시간대({ph}) 기준으로 화성시 {total}개 격자를 분석한 결과, "
@@ -1198,11 +1280,37 @@ def _fallback_report(period: str, kpi: dict, priorities: list, daytype: str = "w
                          f"({DATA['meta']['grid']['sizeMeters'] / 1000:g}km 단위)",
                          f"고수요·저공급 {need}개 ({share}%)",
                          f"사각지대 잠재수요 일 {trips:,}통행"]},
-            {"key": "priority", "heading": "2. 우선 조치 대상",
-             "body": "우선순위는 미스매칭 지수에 수요 규모와 고령 인구 비중을 가중해 산출했다.",
+            {"key": "status", "heading": "2. 현황 분석",
+             "body": f"수요지수는 교통카드 실적과 거주인구를 절반씩 합성해 산출하였고, "
+                     f"공급지수는 운행빈도와 정류장 접근성으로 산출하였다. "
+                     f"{dn} {pn} 기준 고수요·저공급 격자는 {need}개({share}%)로 확인되었다.",
+             "bullets": [f"수요응답형(똑버스) 후보 격자 {kpi.get('drtCells', 0)}개",
+                         f"공급과잉 격자 {kpi.get('overCells', 0)}개",
+                         f"고령층 추정 통행 일 {eld:,}통행"]},
+            {"key": "problem", "heading": "3. 도출된 문제점",
+             "body": "수요 대비 공급이 부족한 격자가 특정 권역에 집중되어 있으며, "
+                     "해당 격자의 잠재 통행이 대중교통으로 흡수되지 못하고 있는 것으로 "
+                     "확인되었다.",
+             "bullets": [f"{i}순위 {p.get('name', '')} — 수요 {p.get('demand')} / "
+                         f"공급 {p.get('supply')}" for i, p in enumerate(top, 1)]},
+            {"key": "plan", "heading": "4. 개선 방안",
+             "body": "정류장 접근성에 따라 조치 수단을 배타적으로 결정하였다. "
+                     "도보권 내 배차 부족은 증차, 노선 인접·정류장 원거리는 정류장 신설, "
+                     "노선 미연결 구간은 수요응답형(똑버스)을 적용한다.",
              "bullets": [f"{i}순위 {p.get('name', '')} — {p.get('actionLabel', '')}"
-                         f" (수요 {p.get('demand')} / 공급 {p.get('supply')})"
                          for i, p in enumerate(top, 1)]},
+            {"key": "effect", "heading": "5. 기대 효과",
+             "body": f"상기 우선순위에 따라 조치할 경우 사각지대 잠재수요 "
+                     f"일 {trips:,}통행 중 일부가 대중교통으로 전환될 것으로 추정된다. "
+                     f"구체적 효과는 배치안별 시뮬레이션으로 산출한다.",
+             "bullets": [f"대상 격자 {need}개 ({share}%)",
+                         f"고령층 추정 통행 일 {eld:,}통행"]},
+            {"key": "next", "heading": "6. 향후 조치 계획",
+             "body": "우선순위 상위 격자를 대상으로 현장 실사를 실시하고, "
+                     "실측 단가를 반영하여 사업비를 재산정한 후 시행 계획을 수립한다.",
+             "bullets": ["상위 격자 현장 실사",
+                         "실측 단가 기준 사업비 재산정",
+                         "시간대별 배차 계획 반영"]},
         ],
         "tables": [{
             "key": "priority", "title": "노선 조정 우선순위",
@@ -1544,7 +1652,6 @@ async def draft_report(req: ReportRequest):
 - 고수요·저공급(need) 격자: {kpi.get('needCells', '미제공')}개 / 전체 {kpi.get('totalCells', DATA['meta']['grid']['cellCount'])}개
 - needShare: {kpi.get('needShare', '미제공')}%
 - 잠재통행량(일): {kpi.get('potentialTripsPerDay', '미제공')}통행
-- 평균 MI: {kpi.get('avgMi', '미제공')}
 
 우선순위 상위 격자 (최대 5개):
 {json.dumps(priorities, ensure_ascii=False, indent=2)}
@@ -1553,16 +1660,17 @@ async def draft_report(req: ReportRequest):
 {rec_block}
 {weekend_note}
 
-다음 섹션을 포함하여 JSON으로 보고서를 작성하세요 (sections: {json.dumps(req.sections, ensure_ascii=False)}):
+**위에 주어진 수치만 사용하십시오. 제공된 데이터에 없는 수치는 어떤 경우에도 쓰지 마십시오.**
+모든 주장에는 위 데이터의 수치 근거를 붙이고, 추정값에는 '추정'·'~로 산정되었다'처럼 불확실성을 드러내십시오.
+
+다음 섹션을 key 그대로 포함하여 JSON으로 보고서를 작성하세요 (sections: {json.dumps(req.sections, ensure_ascii=False)}):
+heading 문자열과 생성 일시·프로바이더·모델은 서버가 채우므로 신경 쓰지 않아도 됩니다.
 
 {{
   "title": "화성시 대중교통 수급 불일치 분석 및 노선 조정 검토(안)",
   "subtitle": "{daytype_name} · {period_name} 시간대({period_hours}) 기준",
   "org": "화성시", "dept": "교통정책과",
   "period": "{req.period}",
-  "generatedAt": "(생성 일시)",
-  "provider": "{_PROVIDERS[provider]['label']}",
-  "model": "{model}",
   "sections": [
     {{"key": "summary", "heading": "1. 검토 개요", "body": "본문...", "bullets": ["항목..."]}}
   ],
@@ -1590,19 +1698,18 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
         # 요청받은 provider(gemini)가 아니라 그 사실을 그대로 보여준다.
         result["provider"]    = _PROVIDERS[used_provider]["label"]
         result["model"]       = used_model
-        return result
+        # 모델 출력을 계약에 맞춘다 — 이 한 줄이 없으면 아무 검증도 없다.
+        return _validate_draft(result, list(req.sections))
     except json.JSONDecodeError as e:
-        return {
-            "title": "보고서 생성 오류 — JSON 파싱 실패",
-            "subtitle": str(e),
-            "period": req.period,
-            "provider": _PROVIDERS[used_provider]["label"],
-            "model": used_model,
-            "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "sections": [],
-            "tables": [],
-            "disclaimer": "AI 응답을 JSON으로 파싱하지 못했습니다.",
-        }
+        # 예전에는 여기만 빈 문서(sections: [])를 내보냈다. 바로 아래
+        # except Exception 은 폴백 초안을 주는데, **폴백이 가장 필요한 자리가
+        # 파싱 실패**다. 화면에 제목만 있고 본문이 없는 문서가 나가면 안 된다.
+        why = ("응답이 max_tokens 에서 잘렸습니다"
+               if _looks_truncated(text) else f"JSON 파싱 실패: {e}")
+        fb = _fallback_report(req.period, kpi, priorities, daytype)
+        fb["disclaimer"] = (f"AI 응답을 문서로 옮기지 못해 규칙 기반 초안으로 "
+                            f"대체했습니다 ({used_provider}: {why}). ") + fb["disclaimer"]
+        return fb
     except Exception as e:
         # 패키지 미설치·키 오류·네트워크 장애 어느 쪽이든 보고서는 나가야 한다.
         # 발표 중에 500 을 띄우느니 규칙 기반 초안을 주고 사유를 함께 적는다.
@@ -1900,7 +2007,8 @@ def _chat_unavailable(reason: str) -> dict:
 _CHAT_BUSY = ("지금 AI 요청이 몰려 있습니다. 잠시 뒤 다시 보내 주세요.")
 
 
-def _chat_result(text: str, provider: str, model: str, mode: str) -> dict:
+def _chat_result(text: str, provider: str, model: str, mode: str,
+                 base_draft: Optional[dict] = None) -> dict:
     """모델이 낸 원문 → 화면이 쓰는 최종 응답. 스트리밍·비스트리밍이 같이 씁니다."""
     out = _extract_json(text)
     if not isinstance(out, dict) or not isinstance(out.get("reply"), str):
@@ -1918,7 +2026,18 @@ def _chat_result(text: str, provider: str, model: str, mode: str) -> dict:
     res = {"reply": out["reply"], "action": act, "ok": True,
            "provider": _PROVIDERS[provider]["label"], "model": model}
     if mode == "report" and isinstance(out.get("draft"), dict):
-        res["draft"] = out["draft"]
+        # 프론트는 돌려받은 sections 로 **통째 교체**한다(report.js 의 onDraft).
+        # 규칙에 "안 고친 섹션도 그대로 포함" 이라고 적어 두었지만 지킨다는 보장이
+        # 없고, 모델이 고친 한 장만 돌려주면 나머지 다섯 장이 조용히 사라진다.
+        # 되돌리기도 없다. 줄어든 초안은 반영하지 않는다 — reply 는 그대로 나간다.
+        new_secs = out["draft"].get("sections")
+        base_secs = (base_draft or {}).get("sections")
+        shrank = (isinstance(new_secs, list) and isinstance(base_secs, list)
+                  and len(new_secs) < len(base_secs))
+        if shrank:
+            res["draftRejected"] = "sections_shrank"
+        else:
+            res["draft"] = out["draft"]
     return res
 
 
@@ -1945,7 +2064,8 @@ async def _sse_once(payload: dict) -> AsyncIterator[str]:
 
 
 async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: str,
-                    *, max_tokens: int = AI_MAX_TOKENS) -> AsyncIterator[str]:
+                    *, max_tokens: int = AI_MAX_TOKENS,
+                    base_draft: Optional[dict] = None) -> AsyncIterator[str]:
     """조각이 오는 대로 reply 를 흘리고, 끝나면 최종 구조를 done 으로 한 번 더 보낸다.
 
     화면은 delta 로 글자를 채우다가 done 에서 action·draft 를 받습니다. 중간에 끊겨도
@@ -1997,7 +2117,8 @@ async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: st
             yield _sse("done", _chat_unavailable(f"AI 호출에 실패했습니다 ({used_provider}: {detail})."))
             return
 
-    yield _sse("done", _chat_result("".join(raw).strip(), used_provider, used_model, mode))
+    yield _sse("done", _chat_result("".join(raw).strip(), used_provider, used_model, mode,
+                                    base_draft))
 
 
 @app.post("/api/v1/chat")
@@ -2044,7 +2165,7 @@ async def chat(req: ChatRequest):
 
     if req.stream:
         return _sse_response(_chat_sse(provider, model, system, msgs, req.mode,
-                                       max_tokens=max_tokens))
+                                       max_tokens=max_tokens, base_draft=req.draft))
 
     try:
         text, used_provider, used_model = await _acall_ai(provider, model, system, msgs,
@@ -2056,4 +2177,4 @@ async def chat(req: ChatRequest):
         detail = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
         return _chat_unavailable(f"AI 호출에 실패했습니다 ({provider}: {detail}).")
 
-    return _json(_chat_result(text, used_provider, used_model, req.mode))
+    return _json(_chat_result(text, used_provider, used_model, req.mode, req.draft))
