@@ -251,10 +251,16 @@ def _derive_action(coverage: float, quadrant: str) -> str:
 
 
 # ─── 시뮬레이션 내부 함수 ──────────────────────────────────────────────────────
-def _apply_cumulative(sim, placements: list) -> dict:
-    """배치 목록을 순차 적용 → 4시간대 state {freq, nearest} 반환."""
-    state = {p: {"freq": sim.S0[p]["freq"].copy(),
-                 "nearest": sim.S0[p]["nearest"].copy()} for p in PERIODS}
+def _apply_cumulative(sim, placements: list, state: Optional[dict] = None) -> dict:
+    """배치 목록을 순차 적용 → 4시간대 state {freq, nearest} 반환.
+
+    state 를 주면 그 위에 **제자리로** 이어 붙인다. 배치를 하나씩 늘려가며
+    단계별 효과를 재는 쪽이 매번 처음부터 다시 쌓지 않게 하려는 것이다
+    (그렇게 하면 배치 수의 제곱에 비례해 느려진다).
+    """
+    if state is None:
+        state = {p: {"freq": sim.S0[p]["freq"].copy(),
+                     "nearest": sim.S0[p]["nearest"].copy()} for p in PERIODS}
     for pl in placements:
         gi = sim.IDX.get(str(pl.get("cellId", "")))
         if gi is None:
@@ -570,7 +576,23 @@ def _validate_placements(sim, placements: list) -> list:
         if not 1 <= count <= MAX_COUNT:
             raise HTTPException(400, f"placements[{i}].count 는 1~{MAX_COUNT} 사이여야 합니다 (받은 값: {count})")
         out.append({"type": mode, "cellId": gid, "count": count})
-    return out
+
+    # 같은 (수단, 격자)가 여러 건으로 오면 하나로 합친다.
+    #
+    # 증편은 원본 배차에 (배수^count − 1) 을 곱해 더하는 방식이라, 병합하지
+    # 않으면 **표현만 다른 같은 배치가 다른 결과**를 낸다:
+    #   count:2 한 건   → 원본 × (1.43² − 1) = 1.045 배 증가
+    #   count:1 두 건   → 원본 × 0.43 + 원본 × 0.43 = 0.86 배 증가
+    # 비용은 둘 다 같은데(2건) 효과만 달랐다. "같은 조건이면 같은 결과"라는
+    # 이 도구의 약속이 깨지는 자리라 입력 단계에서 정규화한다.
+    merged: dict = {}
+    for pl in out:
+        k = (pl["type"], pl["cellId"])
+        if k in merged:
+            merged[k]["count"] = min(merged[k]["count"] + pl["count"], MAX_COUNT)
+        else:
+            merged[k] = pl
+    return list(merged.values())
 
 
 @app.post("/api/v1/simulations")
@@ -917,6 +939,31 @@ def run_recommendations(req: RecRequest):
         f"{STRAT_META[req.strategy]['label']} 추천안", req.budgetKrw,
     )
 
+    # 배치별 기여를 **4시간대 합산**으로 다시 잰다.
+    #
+    # 그리디가 고를 때 쓴 pl["tB"] 는 요청 시간대 하나짜리다(목적함수를 4시간대로
+    # 합치면 출근의 큰 수요가 심야를 덮어써서 period 가 결과에 영향을 못 준다 —
+    # _greedy 주석 참고). 그런데 응답의 effectiveness.resolvedTripsPerDay 는
+    # 4시간대 합이라, 같은 이름의 "해소 통행"이 화면 안에서 4배쯤 어긋나 보였다.
+    #   items 합 7,803 (1개 시간대)  vs  simulation 31,898 (4개 시간대)
+    # 선택 기준은 그대로 두고, **표시값만** 같은 자로 다시 잰다. 배치를 하나씩
+    # 누적하며 증분을 기록하므로 합은 전체와 정확히 일치한다(telescoping).
+    def _dB_total(st) -> float:
+        """4시간대 합산 ΔB̂ — _build_sim_response 의 total_dB 와 같은 식이다.
+        cov 는 손으로 옮겨 적지 않고 sim.compute 가 준 값을 쓴다(정의 갈라짐 방지)."""
+        return sum(sim.dB_hat(p, st[p]["freq"] - sim.S0[p]["freq"],
+                              sim.compute(p, st[p]["freq"], st[p]["nearest"])["cov"]
+                              - sim.BASE_KPI[p]["cov"])
+                   for p in PERIODS)
+
+    prev_total = 0.0
+    st = None
+    for i, pl in enumerate(placed):
+        st = _apply_cumulative(sim, [placements_raw[i]], st)
+        cur_total = _dB_total(st)
+        pl["tB_all"] = cur_total - prev_total
+        prev_total = cur_total
+
     base_cells_am = DATA["cells"]["am"]
     items = [
         {
@@ -929,7 +976,8 @@ def run_recommendations(req: RecRequest):
             "count": 1,
             "radiusKm": RADIUS_KM[pl["mode"]],
             "costKrw": pl["cost"],
-            "expectedResolvedTrips": round(pl["tB"]),
+            # 4시간대 합산 ΔB̂ — simulation.effectiveness.resolvedTripsPerDay 와 같은 자.
+            "expectedResolvedTrips": round(max(pl.get("tB_all", pl["tB"]), 0)),
         }
         for rank, pl in enumerate(placed)
     ]
@@ -939,7 +987,12 @@ def run_recommendations(req: RecRequest):
     am_blk = next((x for x in sim_resp["periods"] if x["period"] == req.period),
                   sim_resp["periods"][0])
     resolved_cells = -int(am_blk["delta"]["needCells"])
-    resolved_trips = max(0, -int(am_blk["delta"]["potentialTripsPerDay"]))
+    # "해소 통행"은 한 가지 뜻이어야 한다 — 4시간대 합산 ΔB̂(예측 승차 증가).
+    # 예전에는 이 자리에 출근 시간대 '사각지대 잠재수요 감소량'이 들어가 있어서,
+    # 같은 이름의 값이 items·summary·simulation 셋에서 서로 달랐다.
+    # 잠재수요 감소량 자체는 여전히 쓸모가 있으므로 이름을 바꿔 함께 싣는다.
+    resolved_trips = int(round(max(sim_resp["effectiveness"]["resolvedTripsPerDay"], 0)))
+    resolved_potential = max(0, -int(am_blk["delta"]["potentialTripsPerDay"]))
     resolved_eld   = max(0, -int(am_blk["delta"]["elderlyTripsPerDay"]))
 
     # 실제 설정된 프로바이더를 그대로 씁니다 — "Claude" 로 못박아 두면 .env 를
@@ -1003,6 +1056,8 @@ def run_recommendations(req: RecRequest):
             "budgetUsedPct": round(total_krw / req.budgetKrw * 100, 1) if req.budgetKrw else 0.0,
             "expectedResolvedCells": resolved_cells,
             "expectedResolvedTrips": resolved_trips,
+            # 출근 시간대 사각지대 잠재수요 감소량(기존 expectedResolvedTrips 의 값).
+            "expectedResolvedPotentialTrips": resolved_potential,
             # 계약(docs/API_SPEC.md §8)에 있는데 빠져 있던 필드. 프론트 어댑터가
             # delta 로 보충하고 있었지만, 서버가 주는 게 맞다.
             "expectedResolvedElderlyTrips": resolved_eld,

@@ -606,6 +606,7 @@ REST 외에 정적 마운트가 둘 있습니다.
     "budgetUsedPct": 29.9,
     "expectedResolvedCells": 11,
     "expectedResolvedTrips": 17680,
+    "expectedResolvedPotentialTrips": 4120,
     "expectedResolvedElderlyTrips": 1068,
     "krwPerTrip": 50735,
     "stoppedBecause": "max_reached",
@@ -613,6 +614,11 @@ REST 외에 정적 마운트가 둘 있습니다.
     "costCompareLabel": "총사업비 기준",
     "costCompareNote": "예산 한도와 같은 기준(총사업비)으로 비교했습니다. 똑버스·증편은 이듬해에도 같은 예산이 필요합니다."
   },
+  /* "해소 통행"의 자(尺)를 못박아 둡니다 — 같은 이름이 다른 뜻으로 쓰이지 않도록.
+     · items[].expectedResolvedTrips  = 그 배치 한 건의 4시간대 합산 ΔB̂ (예측 승차 증가/일)
+     · summary.expectedResolvedTrips  = items 합 = simulation.effectiveness.resolvedTripsPerDay
+     · summary.expectedResolvedPotentialTrips = 요청 시간대 사각지대 잠재수요 감소량/일 (다른 지표)
+     앞의 둘은 반드시 같은 값이어야 하며 tests/test_api.py 가 이를 검사합니다. */
   "simulation": { /* POST /simulations 응답과 동일한 구조 */ },
   "alternatives": [
     {

@@ -300,12 +300,26 @@ def test_freq_placement_is_associative(c):
 
 
 def test_documented_stop_count_matches_api(c):
-    """README·API_SPEC 이 말하는 정류장 수와 실제 배포 수가 같아야 한다."""
+    """산출물이 스스로 밝힌 정류장 수와 실제 배포 수가 같아야 한다.
+
+    마스터(stops_hwaseong.csv 3,158)와 API 배포(2,866)는 원래 다르다 —
+    승하차 원본과 매칭되지 않아 API 식별자(41590-{ARS})를 만들 수 없는 행
+    292개가 빠지기 때문이다. 문제는 그 차이가 아니라 **어디에도 안 적혀
+    있는 것**이었으므로, meta.dataQuality.stops 가 세 수(마스터·배포·제외)를
+    밝히고 이 테스트가 그것과 API 를 대조한다.
+    """
     import pandas as pd
     csv_rows = len(pd.read_csv(ROOT / "dataset_hwaseong" / "stops_hwaseong.csv"))
     api_rows = len(c.get("/api/v1/stops").json()["stops"])
-    assert csv_rows == api_rows, \
-        f"문서 기준 {csv_rows}개 · API 배포 {api_rows}개 (stop_id 결측 {csv_rows - api_rows}개 탈락)"
+    meta_stops = c.get("/api/v1/meta").json()["dataQuality"]["stops"]
+
+    assert meta_stops["masterCount"] == csv_rows, \
+        f"meta 가 말한 마스터 {meta_stops['masterCount']}개 · 실제 CSV {csv_rows}행"
+    assert meta_stops["publishedCount"] == api_rows, \
+        f"meta 가 말한 배포 {meta_stops['publishedCount']}개 · API {api_rows}개"
+    assert meta_stops["masterCount"] - meta_stops["excludedCount"] == api_rows, \
+        "마스터 − 제외 = 배포 가 맞지 않는다"
+    assert meta_stops.get("excludedReason"), "제외 사유가 비어 있다"
 
 
 # ══════════════════════════════════════════════════════════════

@@ -193,7 +193,16 @@ flow  = pd.read_csv(D_DIR / "flow_hourly.csv")
 with open(D_DIR / "hwaseong_dong.geojson", encoding="utf-8") as fh:
     geojson = json.load(fh)
 
-# 정류장: stop_id 없는 행 제거
+# 정류장: stop_id 없는 행 제거.
+# 국토부 마스터에는 있지만 승하차 원본의 정류소ID와 매칭되지 않은 행들이다.
+# API 는 정류장을 id 로 식별하므로(계약: 41590-{ARS}) 이 행들은 내보낼 수 없다.
+# 다만 **말 없이 사라지면 안 된다** — 산출물이 스스로 몇 개를 왜 뺐는지 밝히도록
+# meta.dataQuality.stops 에 기록한다(문서와 실물이 갈라지는 자리였다).
+STOPS_TOTAL = len(stops)
+_dropped = stops[stops["stop_id"].isna()]
+STOPS_EXCLUDED = len(_dropped)
+STOPS_EXCLUDED_BOARD = float(_dropped["board_day"].fillna(0).sum())
+STOPS_BOARD_TOTAL = float(stops["board_day"].fillna(0).sum())
 stops = stops.dropna(subset=["stop_id"]).copy()
 
 # grid_id → region_kind 매핑 (stops에 region_kind 열 없음 → grid에서 채움)
@@ -796,6 +805,16 @@ meta = {
         "boundary": {
             "level": "observed", "label": "행정경계",
             "source": "SGIS 통계지리정보서비스 읍면동 경계 (bnd_dong_00_2025_2Q)",
+        },
+        # 정류장 마스터와 API 배포 수가 다른 이유를 산출물이 직접 밝힌다.
+        "stops": {
+            "level": "observed", "label": "정류장",
+            "masterCount":    STOPS_TOTAL,
+            "publishedCount": STOPS_TOTAL - STOPS_EXCLUDED,
+            "excludedCount":  STOPS_EXCLUDED,
+            "excludedReason": "승하차 원본의 정류소ID와 매칭되지 않아 API 식별자(41590-{ARS})를 만들 수 없는 행",
+            "excludedBoardingShare": (round(STOPS_EXCLUDED_BOARD / STOPS_BOARD_TOTAL * 100, 2)
+                                      if STOPS_BOARD_TOTAL else 0.0),
         },
     },
     # 근거가 없는 값들. 사업비와 같은 성격이라 화면에 가정임을 표시해야 한다.
