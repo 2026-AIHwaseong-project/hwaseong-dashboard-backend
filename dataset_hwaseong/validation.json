@@ -13,44 +13,44 @@
   "log_rail"
  ],
  "coefficients": {
-  "log_pop": 0.4242,
-  "log_freq": 0.5492,
-  "coverage": -0.0106,
-  "log_workers": 0.1752,
-  "elderly_ratio": -1.7181,
-  "log_rail": -0.1491
+  "log_pop": 0.4227,
+  "log_freq": 0.5506,
+  "coverage": 0.0059,
+  "log_workers": 0.1748,
+  "elderly_ratio": -1.6917,
+  "log_rail": -0.1482
  },
- "freqElasticity": 0.5492,
+ "freqElasticity": 0.5506,
  "r2": {
-  "train_raw": 0.9293,
-  "train_log": 0.86,
-  "cv_raw": 0.872,
-  "cv_log": 0.8521
+  "train_raw": 0.9274,
+  "train_log": 0.8463,
+  "cv_raw": 0.8746,
+  "cv_log": 0.8386
  },
  "r2BySubset": {
   "pop_ge_0": {
    "n": 786,
    "boardingShare": 1.0,
-   "cv_log": 0.8521,
-   "cv_raw": 0.872
+   "cv_log": 0.8386,
+   "cv_raw": 0.8746
   },
   "pop_ge_50": {
    "n": 603,
    "boardingShare": 0.9989,
-   "cv_log": 0.8141,
-   "cv_raw": 0.8682
+   "cv_log": 0.7962,
+   "cv_raw": 0.871
   },
   "pop_ge_200": {
    "n": 354,
-   "boardingShare": 0.9804,
-   "cv_log": 0.8081,
-   "cv_raw": 0.8571
+   "boardingShare": 0.9806,
+   "cv_log": 0.7783,
+   "cv_raw": 0.86
   }
  },
  "headline": {
-  "scope": "인구≥200 격자 354칸 (실측 승차의 98.0%)",
-  "cv_log": 0.8081,
-  "cv_raw": 0.8571
+  "scope": "인구≥200 격자 354칸 (실측 승차의 98.1%)",
+  "cv_log": 0.7783,
+  "cv_raw": 0.86
  },
  "demandBasis": "초승(환승 제외) · 평일 일평균 — 03_join.py [4][5]",
  "qualitativeUsable": 4,
@@ -59,27 +59,27 @@
   {
    "region": "양감면",
    "cells": 34,
-   "r2_log": -0.278
+   "r2_log": -0.2256
   },
   {
    "region": "동탄1동",
    "cells": 5,
-   "r2_log": -0.2651
+   "r2_log": -0.0926
+  },
+  {
+   "region": "진안동",
+   "cells": 8,
+   "r2_log": 0.0408
   },
   {
    "region": "반월동",
    "cells": 4,
-   "r2_log": 0.0666
+   "r2_log": 0.0753
   },
   {
    "region": "마도면",
    "cells": 35,
-   "r2_log": 0.2616
-  },
-  {
-   "region": "장안면",
-   "cells": 67,
-   "r2_log": 0.5994
+   "r2_log": 0.2665
   }
  ],
  "target": 0.6,
@@ -90,7 +90,7 @@
     "rank": 1,
     "region": "동탄7동",
     "gridId": "다사6707",
-    "priority": 2.5823,
+    "priority": 2.5993,
     "action": "DRT",
     "lat": 37.16568,
     "lon": 127.13394
@@ -99,7 +99,7 @@
     "rank": 2,
     "region": "봉담읍",
     "gridId": "다사4814",
-    "priority": 1.973,
+    "priority": 1.9889,
     "action": "DRT",
     "lat": 37.22792,
     "lon": 126.91946
@@ -108,7 +108,7 @@
     "rank": 3,
     "region": "동탄9동",
     "gridId": "다사6710",
-    "priority": 1.948,
+    "priority": 1.9632,
     "action": "DRT",
     "lat": 37.19272,
     "lon": 127.13381
@@ -117,7 +117,7 @@
     "rank": 4,
     "region": "봉담읍",
     "gridId": "다사4813",
-    "priority": 1.8398,
+    "priority": 1.8538,
     "action": "DRT",
     "lat": 37.21891,
     "lon": 126.91953
@@ -126,7 +126,7 @@
     "rank": 5,
     "region": "동탄9동",
     "gridId": "다사6809",
-    "priority": 1.7718,
+    "priority": 1.7864,
     "action": "NEW_STOP",
     "lat": 37.18374,
     "lon": 127.14512
@@ -137,7 +137,7 @@
     "rank": 1,
     "region": "진안동",
     "gridId": "다사5914",
-    "priority": 3.2061,
+    "priority": 3.1683,
     "action": "ADD_FREQ",
     "lat": 37.22847,
     "lon": 127.04345
@@ -146,37 +146,37 @@
     "rank": 2,
     "region": "동탄7동",
     "gridId": "다사6707",
-    "priority": 3.0981,
+    "priority": 3.1054,
     "action": "DRT",
     "lat": 37.16568,
     "lon": 127.13394
    },
    {
     "rank": 3,
-    "region": "진안동",
-    "gridId": "다사5915",
-    "priority": 2.9414,
+    "region": "향남읍",
+    "gridId": "다사4702",
+    "priority": 2.7047,
     "action": "ADD_FREQ",
-    "lat": 37.23748,
-    "lon": 127.0434
+    "lat": 37.1197,
+    "lon": 126.90903
    },
    {
     "rank": 4,
     "region": "동탄9동",
     "gridId": "다사6708",
-    "priority": 2.492,
+    "priority": 2.4992,
     "action": "ADD_FREQ",
     "lat": 37.1747,
     "lon": 127.13389
    },
    {
     "rank": 5,
-    "region": "향남읍",
-    "gridId": "다사4702",
-    "priority": 2.3809,
-    "action": "ADD_FREQ",
-    "lat": 37.1197,
-    "lon": 126.90903
+    "region": "봉담읍",
+    "gridId": "다사4814",
+    "priority": 2.2497,
+    "action": "DRT",
+    "lat": 37.22792,
+    "lon": 126.91946
    }
   ]
  },
@@ -186,7 +186,7 @@
    "verified": true,
    "finding": "송산그린시티. 안산 생활권인데 연결 시내버스가 안산 업체 10번 하나뿐. 화성시가 동탄·병점권 위주로 투자해 노선 신설이 지연된다고 보도됨",
    "source": "경기일보 2018-05-02 / 나무위키 송산그린시티·새솔동",
-   "currentRank": "am 19/30위 · night need 아님",
+   "currentRank": "am 20/30위 · night need 아님",
    "inTop5": false
   },
   {
@@ -194,7 +194,7 @@
    "verified": true,
    "finding": "비봉지구 마을버스 막차가 22시경 종료. 인구 증가 대비 대중교통 개선 지연",
    "source": "나무위키 가축수송(교통)/사례/버스/경기도",
-   "currentRank": "am need 아님 · night 8/39위",
+   "currentRank": "am need 아님 · night 7/40위",
    "inTop5": false
   },
   {
@@ -202,7 +202,7 @@
    "verified": true,
    "finding": "신동(동탄9동) 17,000세대·5만명 입주 지역. \"동탄역-신동 연계 출퇴근 차량 막차가 오후 7시면 종료\"되어 직장인 불편 호소. GTX·SRT 동탄역 접근 취약, 트램 설계에서도 배제됐다고 시의회·지역위원장이 지적",
    "source": "경인매일 2025-04-07 「5만명 입주 앞둔 동탄 신동, 교통·문화시설 절대 부족」",
-   "currentRank": "am 3/30위 · night 4/39위",
+   "currentRank": "am 3/30위 · night 4/40위",
    "inTop5": true
   },
   {
@@ -210,7 +210,7 @@
    "verified": true,
    "finding": "화성시 공식 민원(시민소통광장). 봉담2지구 등 약 17,000세대 입주했으나 서울행 광역버스는 7790번 하나뿐. 기존 8155·8156번은 \"만차가 되어 이용하지 못하는 경우가 대부분\", 1006번은 \"배차시간이 1시간 이상\"이라고 명시",
    "source": "화성시 시민소통광장 2026-04-20 「봉담기점 서울행 광역버스 신설 촉구」",
-   "currentRank": "am 2/30위 · night 6/39위",
+   "currentRank": "am 2/30위 · night 5/40위",
    "inTop5": true
   },
   {
@@ -218,7 +218,7 @@
    "verified": true,
    "finding": "화성시 공식 민원(시민소통광장). 병점(병점·진안·안화동 일대)이 동탄 신도시 위주 투자에서 소외됐다며 \"야간·주말 교통 공백\", \"구청 순환버스조차 없고 똑버스 운행 계획에서도 사실상 제외\"라고 지적, 똑버스 조속 도입 요청",
    "source": "화성시 시민소통광장 2026-05-20 「병점지역 순환버스·똑버스 운행요청」",
-   "currentRank": "am 21/30위 · night 1/39위",
+   "currentRank": "am 21/30위 · night 1/40위",
    "inTop5": true
   },
   {
@@ -226,7 +226,7 @@
    "verified": true,
    "finding": "동탄7·9동(마선거구) 시의원 후보가 \"대중교통 공백이 발생하는 야간 시간대\" 해소를 위한 심야 자율주행 동탄순환버스 도입을 공약. 지역구 교통 현안으로 야간 공백이 공식 제기됨",
    "source": "경인신문(asn24) 2026-05-24 「화성시의회 김상균 후보, 동탄7·9동 교통 공약 발표」",
-   "currentRank": "am 1/30위 · night 2/39위",
+   "currentRank": "am 1/30위 · night 2/40위",
    "inTop5": true
   },
   {
@@ -234,7 +234,7 @@
    "verified": false,
    "finding": "⚠️ 신호가 엇갈린다 — 남양여객은 \"배차간격도 길고 수요도 극히 낮다\"고 서술되지만(나무위키), 남양뉴타운 자체는 2025-02 서울역 직행 5101번이 새로 개통되는 등 최근 노선이 늘고 있다(머니투데이). '지금도 문제'라고 단정할 개별 민원을 못 찾아 verified 는 보류한다",
    "source": null,
-   "currentRank": "am 6/30위 · night 9/39위",
+   "currentRank": "am 6/30위 · night 8/40위",
    "inTop5": false
   },
   {
@@ -242,7 +242,7 @@
    "verified": false,
    "finding": "개별 지명 민원은 못 찾음. 다만 화성시가 2026-05 대중교통 소외지역 대응으로 구청 연계 순환버스 9개 노선을 발표하는 등, 시 차원에서 소외지역 문제를 공식 인지하고 있다는 정황은 있다",
    "source": "머니투데이 등 2026-05-18 「화성시, 3개 구청 연계 순환버스 9개 노선 추가 확충」",
-   "currentRank": "am 15/30위 · night 5/39위",
+   "currentRank": "am 19/30위 · night 3/40위",
    "inTop5": true
   },
   {
@@ -250,7 +250,7 @@
    "verified": false,
    "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함. 다만 야간 무공급(운행 0회) 격자로 실측된다",
    "source": null,
-   "currentRank": "am 17/30위 · night 38/39위",
+   "currentRank": "am 15/30위 · night 39/40위",
    "inTop5": false
   },
   {
@@ -258,7 +258,7 @@
    "verified": false,
    "finding": "공개 자료에서 개별 민원 사례를 확인하지 못함",
    "source": null,
-   "currentRank": "am 20/30위 · night 15/39위",
+   "currentRank": "am 18/30위 · night 14/40위",
    "inTop5": false
   }
  ]
