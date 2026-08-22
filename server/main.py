@@ -32,10 +32,10 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -172,6 +172,31 @@ app.add_middleware(
 # 시뮬레이션 응답(cellsByPeriod)이 1.5MB — JSON 이라 8~10배 압축됩니다.
 # 격자를 500m 로 세분화하면 4배가 더 커지므로 압축이 사실상 필수입니다.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# 업로드 본문 상한 — FastAPI 는 본문을 **전부 버퍼링한 뒤에야** 의존성을 풀고
+# 핸들러를 부른다. 즉 라우트 안의 어떤 크기 검사도 이미 다 받아버린 뒤의 사후
+# 통보다. 진짜 상한은 이 층(그리고 Caddyfile 의 request_body)에 있어야 한다.
+# Caddy 를 거치지 않는 127.0.0.1:8000 직결도 여기서 막힌다.
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _limit_upload_body(request: Request, call_next):
+    if request.url.path.startswith("/api/v1/admin/upload"):
+        raw = request.headers.get("content-length")
+        if raw is not None:
+            try:
+                size = int(raw)
+            except ValueError:
+                return JSONResponse(status_code=400,
+                                    content={"detail": "Content-Length 가 올바르지 않습니다"})
+            if size > MAX_UPLOAD_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": f"파일이 너무 큽니다 — 최대 "
+                                       f"{MAX_UPLOAD_BYTES // 1048576}MB 까지 올릴 수 있습니다"})
+    return await call_next(request)
+
 
 # 관리자 콘솔 — ADMIN_TOKEN 미설정이면 전 라우트가 503 (기본 비활성).
 app.include_router(admin.router)
