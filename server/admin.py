@@ -14,10 +14,14 @@
     부른다 — 새로 import 된 시뮬 모듈은 기본값으로 돌아가 있기 때문이다.
 
 인증: ADMIN_TOKEN 환경변수 + Authorization: Bearer.
-  ⚠️ 토큰이 **비어 있으면 인증 없이 열린다**(내부망·단일 운영자 전제의 기본값).
-     공개 인터넷에 노출된 서버라면 반드시 ADMIN_TOKEN 을 설정할 것 — 없으면
-     누구나 단가·모델 상수를 바꾸고 재계산을 트리거할 수 있다(workers=1 이라
-     재계산 반복만으로 전 API 가 멎는다). 기동 로그와 화면 배너로 경고한다.
+  **읽기(GET)와 쓰기(POST)를 나눈다.**
+    · GET  — 토큰 없이도 열린다. 파라미터 대장·상태·이력을 둘러보는 것은 공개
+             정보이고, "회원가입 없이 열어볼 수 있다"가 이 제품의 강점이다.
+    · POST — 토큰이 설정돼 있으면 반드시 요구한다(저장·재계산). 미설정이면
+             통과하되 기동 로그·화면 배너로 경고한다.
+  ⚠️ 공개 인터넷에 노출된 서버라면 ADMIN_TOKEN 을 설정할 것. 없으면 누구나
+     단가·모델 상수를 바꾸고 재계산을 트리거할 수 있고, workers=1 이라
+     재계산 반복만으로 전 API 가 멎는다(시연 중이면 그대로 사고다).
   실패 잠금은 전역 카운터다. IP별 잠금은 행사장 NAT 오차단으로 롤백된 전례가 있다
   (main.py 의 레이트리밋 이력 참고).
 
@@ -305,11 +309,33 @@ def warn_if_open() -> None:
         print("[admin] 관리자 콘솔 토큰 인증 활성", flush=True)
 
 
-async def require_admin(authorization: str = Header(default=""),
-                        x_forwarded_for: str = Header(default="")):
+async def require_read(authorization: str = Header(default="")):
+    """조회는 **토큰이 있든 없든 연다.**
+
+    "보는 데는 잠금이 없고, 바꾸는 데만 잠금이 있습니다" 의 앞쪽 절이다.
+    파라미터 대장(값·근거·기본값)과 데이터 상태는 심사위원·시민이 그대로
+    열어봐도 되는 정보이고, 오히려 열어 두는 것이 이 제품의 강점이다.
+    (반환값은 '이 요청이 쓰기 권한까지 가졌는가' — 이력 필터가 쓴다.)"""
     token = os.environ.get("ADMIN_TOKEN", "")
     if not token:
-        return True   # 무인증 모드 — 위 docstring 의 경고 참고
+        return True
+    given = authorization[7:].strip() if authorization.startswith("Bearer ") else authorization.strip()
+    return bool(given and hmac.compare_digest(given, token))
+
+
+async def require_write(authorization: str = Header(default=""),
+                        x_forwarded_for: str = Header(default="")):
+    """저장·재계산 — 토큰이 설정돼 있으면 반드시 요구한다.
+    미설정 서버(내부망 전제)에서는 통과하되 경고는 이미 기동 시 찍혔다.
+    workers=1 이라 재계산 트리거 하나가 전 API 를 멈출 수 있어, 공개 서버에서
+    이 문이 열려 있으면 시연 중 사고로 이어진다."""
+    if not os.environ.get("ADMIN_TOKEN", ""):
+        return True
+    return await _check_token(authorization, x_forwarded_for)
+
+
+async def _check_token(authorization: str, x_forwarded_for: str):
+    token = os.environ.get("ADMIN_TOKEN", "")
     given = authorization[7:].strip() if authorization.startswith("Bearer ") else authorization.strip()
     # 정답 토큰은 잠금 중에도 통과한다 — 잠금은 브루트포스 지연 장치이지 정당한
     # 관리자를 봉쇄하는 장치가 아니다. (구버전 토큰을 든 탭의 폴링이 잠금을
@@ -334,8 +360,10 @@ async def require_admin(authorization: str = Header(default=""),
     raise HTTPException(401, "관리자 토큰이 올바르지 않습니다.")
 
 
+# 라우터 공통 의존성은 **읽기** 기준. 쓰기 엔드포인트는 아래에서 각자
+# Depends(require_write) 를 하나 더 단다.
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"],
-                   dependencies=[Depends(require_admin)])
+                   dependencies=[Depends(require_read)])
 
 
 # ─── 최신화 잡 ──────────────────────────────────────────────────────────────────
@@ -568,7 +596,7 @@ class SaveRequest(BaseModel):
 
 
 @router.post("/params")
-def save_params(req: SaveRequest):
+def save_params(req: SaveRequest, _w=Depends(require_write)):
     if JOB["status"] == "running":
         raise HTTPException(409, "데이터 갱신이 진행 중입니다. 끝난 뒤 다시 시도하세요.")
     reason = (req.reason or "").strip()
@@ -641,7 +669,7 @@ class RefreshRequest(BaseModel):
 
 
 @router.post("/refresh")
-async def start_refresh(req: RefreshRequest):
+async def start_refresh(req: RefreshRequest, _w=Depends(require_write)):
     if JOB["status"] == "running":
         raise HTTPException(409, "이미 갱신이 진행 중입니다.")
     valid = {"join", "model", "validate", "load", "db", "reload"}
@@ -685,12 +713,14 @@ def get_status():
                 "result": JOB["result"], "logTail": list(JOB["log"])[-40:]},
         "env": {"dbConfigured": bool(os.environ.get("DATABASE_URL")),
                 "varDirWritable": writable,
-                "authRequired": auth_required()},
+                "authRequired": auth_required(),
+                "writeLocked": auth_required()},
     }
 
 
 @router.get("/history")
-def get_history(limit: int = Query(50, ge=1, le=500), kind: Optional[str] = None):
+def get_history(limit: int = Query(50, ge=1, le=500), kind: Optional[str] = None,
+                can_write: bool = Depends(require_read)):
     items = []
     try:
         with open(HISTORY_PATH, encoding="utf-8") as f:
@@ -703,6 +733,10 @@ def get_history(limit: int = Query(50, ge=1, le=500), kind: Optional[str] = None
                 except ValueError:
                     continue
                 if kind and ev.get("kind", "").split(".")[0] != kind:
+                    continue
+                # 인증 실패 기록에는 접속 IP 가 들어간다 — 쓰기 권한이 있는
+                # 운영자에게만 보인다(누가 두드렸는지는 운영 정보다).
+                if ev.get("kind") == "auth.fail" and not can_write:
                     continue
                 items.append(ev)
     except FileNotFoundError:
