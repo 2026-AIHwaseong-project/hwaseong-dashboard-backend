@@ -440,6 +440,9 @@ def _build_sim_response(sim, placements_raw: list, state: dict, name: str, budge
         "placements": pl_list,
         "cost": {"totalKrw": total_krw, "breakdown": breakdown},
         "budgetKrw": budget_krw,
+        # 예산을 넘겨도 200 으로 나가던 자리. 화면이 스스로 비교하고 있었지만
+        # 서버가 한도를 아는 이상 판정도 서버가 하는 게 맞다(추가 필드라 기존 계약은 그대로).
+        "overBudget": bool(budget_krw and total_krw > budget_krw),
         "periods": periods_list,
         "effectiveness": {
             "resolvedNeedCells": max(resolved, 0),
@@ -465,10 +468,17 @@ def get_grid(period: str = Query("am"), daytype: str = Query("wd")):
 
 
 # ─── 3. GET /api/v1/priorities ─────────────────────────────────────────────────
+MAX_LIMIT = 100   # 우선순위 목록의 상한. need+drt 가 시간대당 100여 개라 그 이상은 뜻이 없다.
+
+
 @app.get("/api/v1/priorities")
 def get_priorities(period: str = Query("am"), limit: int = Query(10), daytype: str = Query("wd")):
     _chk_period(period)
     _chk_daytype(daytype)
+    # limit 이 음수면 Python 슬라이스가 cells[:-1] 로 새어 **거의 전부**가 나간다.
+    # 실측: limit=-1 → 101건이 rank 1~101 로 200 응답. 조용히 계약을 깨는 종류다.
+    if not 0 <= limit <= MAX_LIMIT:
+        raise HTTPException(400, f"limit 은 0~{MAX_LIMIT} 사이여야 합니다 (받은 값: {limit})")
     cells = [c for c in DATA[_grid_key(period, daytype)]["cells"]
              if c["quadrant"] in ("need", "drt")]
     cells.sort(key=lambda c: c["priorityScore"], reverse=True)
@@ -525,7 +535,8 @@ class SimRequest(BaseModel):
     placements: list = []
 
 
-MAX_COUNT = 20   # 한 격자에 같은 수단을 몇 개까지. 그 이상은 실무적으로 의미가 없다.
+MAX_COUNT = 20        # 한 격자에 같은 수단을 몇 개까지. 그 이상은 실무적으로 의미가 없다.
+MAX_PLACEMENTS = 100  # 한 시나리오에 배치 몇 건까지. 화면에서 100건을 넘길 일이 없다.
 
 
 def _validate_placements(sim, placements: list) -> list:
@@ -538,6 +549,10 @@ def _validate_placements(sim, placements: list) -> list:
       · count: 999 → 정류장 999개에 419억원. 효과는 1칸.
     조용히 틀린 예산을 보여주느니 왜 틀렸는지 알려주고 막는 게 낫다.
     """
+    # 배열 길이에도 상한이 필요하다. count 만 20 으로 막아 두면 같은 배치를 2,000건
+    # 늘어놓아 1.68조 원짜리 응답을 받을 수 있다(실측). 연산도 그만큼 늘어난다.
+    if len(placements) > MAX_PLACEMENTS:
+        raise HTTPException(400, f"placements 는 {MAX_PLACEMENTS}건 이하여야 합니다 (받은 값: {len(placements)})")
     out = []
     for i, pl in enumerate(placements):
         if not isinstance(pl, dict):
@@ -563,6 +578,10 @@ def run_simulation(req: SimRequest):
     _chk_period(req.period)
     if req.budgetKrw is None:
         req.budgetKrw = admin.effective("cost.defaultBudget")
+    # /recommendations 는 이미 막고 있는데 여기만 빠져 있었다. 음수 예산이 들어오면
+    # 화면의 집행률이 음수로 표시된다.
+    if req.budgetKrw < 0:
+        raise HTTPException(400, "budgetKrw 는 0 이상이어야 합니다.")
     sim   = DATA["sim"]
     placements = _validate_placements(sim, req.placements)
     state = _apply_cumulative(sim, placements)
@@ -1124,6 +1143,28 @@ def _default_model(provider: str) -> str:
     return _PROVIDERS[provider]["default_model"]
 
 
+def _resolve_model(provider: str, requested: Optional[str]) -> str:
+    """요청 모델을 **허용목록과 대조한 뒤** 돌려준다.
+
+    /providers 가 이미 프로바이더별 모델 목록을 내려주는데 정작 요청 검증에는
+    안 쓰고 있었다. 그래서 임의 문자열이 그대로 SDK 로 넘어갔고, 무인증·레이트리밋
+    없는 상태에서 프리미엄 모델을 강제로 호출시킬 수 있었다(실측: model=claude-opus-5
+    지정이 그대로 수락됨).
+
+    .env 의 AI_MODEL 로 지정한 모델은 운영자가 직접 고른 것이므로 목록 밖이어도 통과시킨다
+    — 새 모델이 나올 때마다 코드를 고쳐야 하면 그 설정이 무의미해진다.
+    """
+    if not requested:
+        return _default_model(provider)
+    allowed = {m["id"] for m in _PROVIDERS[provider]["models"]}
+    allowed.add(_default_model(provider))          # .env AI_MODEL 예외
+    if requested not in allowed:
+        raise HTTPException(
+            400, f"{provider} 에서 쓸 수 있는 모델이 아닙니다: {requested!r} "
+                 f"(가능: {sorted(allowed)})")
+    return requested
+
+
 def _fallback_report(period: str, kpi: dict, priorities: list, daytype: str = "wd") -> dict:
     """AI 키가 없을 때 쓰는 규칙 기반 초안.
 
@@ -1414,6 +1455,29 @@ def _call_ai(provider: str, model: str, prompt: str) -> str:
     return text
 
 
+MAX_CTX_CHARS = 60_000   # context 블록 하나가 프롬프트에 실릴 수 있는 상한
+
+
+def _ctx_block(title: str, obj) -> str:
+    """context 를 프롬프트에 싣되 길이를 자른다.
+
+    이전에는 context.simulation / context.recommendation 을 json.dumps 로 통째로
+    이어붙였다. 상한이 없어 50만 자를 보내면 프롬프트가 100만 자까지 커졌다(실측
+    2,794자 → 1,002,823자). 무인증·레이트리밋 없는 엔드포인트라 토큰 비용 증폭 경로가
+    된다. 프론트는 slimSimulation() 으로 이미 줄여 보내므로 정상 사용은 이 상한에
+    걸리지 않는다 — 걸린다면 그건 프론트가 보낸 것이 아니다.
+
+    자르는 쪽을 택한 이유: 400 으로 막으면 화면의 「AI 보고서 생성」 버튼이 깨진다.
+    잘렸다는 사실은 모델에게 명시해 없는 내용을 지어내지 않게 한다.
+    """
+    if not obj:
+        return ""
+    body = json.dumps(obj, ensure_ascii=False, indent=2)
+    if len(body) > MAX_CTX_CHARS:
+        body = body[:MAX_CTX_CHARS] + "\n… (이하 생략 — 잘린 부분은 근거로 쓰지 마십시오)"
+    return f"{title}:\n{body}"
+
+
 class ReportRequest(BaseModel):
     period: str = "am"
     provider: str = "auto"      # auto | claude | openai | gemini
@@ -1459,12 +1523,12 @@ async def draft_report(req: ReportRequest):
     # 500 을 던지면 화면의 「AI 보고서 생성」 버튼이 그냥 깨진다.
     if provider is None:
         return _fallback_report(req.period, kpi, priorities, daytype)
-    model = req.model or _default_model(provider)
+    model = _resolve_model(provider, req.model)
     sim_ctx      = req.context.get("simulation")
     rec_ctx      = req.context.get("recommendation")
 
-    sim_block = ("시뮬레이션 결과:\n" + json.dumps(sim_ctx, ensure_ascii=False, indent=2)) if sim_ctx else ""
-    rec_block = ("추천 배치안:\n"      + json.dumps(rec_ctx, ensure_ascii=False, indent=2)) if rec_ctx else ""
+    sim_block = _ctx_block("시뮬레이션 결과", sim_ctx)
+    rec_block = _ctx_block("추천 배치안", rec_ctx)
     # weekendImpact 는 rec_ctx 안에 그냥 JSON으로 묻혀 들어가면 모델이 못 보고 지나칠 수
     # 있다 — 있으면 반드시 짚으라고 한 줄로 못박는다.
     weekend_note = ("\n(주의: 추천 배치안에 weekendImpact 가 포함돼 있습니다 — 이 안이 "
@@ -1960,7 +2024,7 @@ async def chat(req: ChatRequest):
         return _sse_response(_sse_once(nokey)) if req.stream else nokey
     if provider not in _PROVIDERS:
         raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
-    model = req.model or _default_model(provider)
+    model = _resolve_model(provider, req.model)
 
     kb = CHAT_KB_PATH.read_text("utf-8") if CHAT_KB_PATH.exists() else ""
     rules = _CHAT_REPORT_RULES if req.mode == "report" else _CHAT_RULES
