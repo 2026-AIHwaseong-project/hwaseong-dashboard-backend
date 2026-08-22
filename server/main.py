@@ -632,7 +632,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
         cand_mask = cand_mask & in_reg
     cand_idx = np.where(cand_mask)[0]
     if len(cand_idx) == 0:
-        return [], state, "no_candidate"
+        return [], state, "no_candidate", state_we
 
     types = ["stop"] if strategy == "quick" else list(allowed_types)
 
@@ -642,7 +642,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
     stopped = "max_reached"
     min_cost = min(COST_KRW[m] for m in (["stop"] if strategy == "quick" else allowed_types))
     if budget < min_cost:
-        return [], state, "budget_too_small"
+        return [], state, "budget_too_small", state_we
 
     # equity 의 수혜 대상(need/drt) 마스크 — 기준선 사분면 기반이라 불변.
     # 목적함수가 요청 시간대 하나이므로 그 시간대만 만든다.
