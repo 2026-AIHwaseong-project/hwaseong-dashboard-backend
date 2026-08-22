@@ -591,3 +591,159 @@ def test_prompt_has_no_dead_avgmi_and_forbids_invented_numbers(c, monkeypatch):
     prompt = seen["text"]
     assert "avgMi" not in prompt and "평균 MI" not in prompt, "죽은 avgMi 줄이 남아 있다"
     assert "없는 수치는 어떤 경우에도 쓰지 마십시오" in prompt, "수치 금지 문장이 없다"
+
+
+# ══════════════════════════════════════════════════════════════
+# I. 관리자 데이터 업로드
+#
+# 이 구간의 **가장 중요한 두 건은 신규 기능이 아니라 기존 경로 회귀**다.
+# 업로드용으로 RefreshRequest 에 필드를 더하면서 uploadId 없는 요청의 동작이
+# 바뀌면, 배포된 프론트의 [모델 재계산]·[화면 반영] 버튼이 조용히 죽는다
+# (완료 토스트는 그대로 떠서 실패로 보이지도 않는다).
+# ══════════════════════════════════════════════════════════════
+import base64 as _b64
+
+
+@pytest.fixture
+def adm(monkeypatch, tmp_path):
+    """관리자 상태를 테스트용으로 격리한다 — var/ 도 이력도 tmp 로 돌린다.
+
+    JOB 은 모듈 전역이고 c 픽스처가 session 스코프라, 상태를 되돌리지 않으면
+    이후 모든 관리자 테스트가 409 로 무너진다.
+    """
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from server import admin
+
+    monkeypatch.setattr(admin, "VAR", tmp_path)
+    monkeypatch.setattr(admin, "ADMIN_DIR", tmp_path / "admin")
+    monkeypatch.setattr(admin, "HISTORY_PATH", tmp_path / "admin" / "history.jsonl")
+    monkeypatch.setenv("HW_UPLOAD_ENABLED", "1")
+    monkeypatch.delenv("HW_UPLOAD_APPLY", raising=False)
+
+    calls = []
+
+    async def fake_run(steps, reason, actor, upload_id=None, apply=True):
+        calls.append({"steps": list(steps), "uploadId": upload_id, "apply": apply})
+        admin.JOB.update(status="done")
+
+    monkeypatch.setattr(admin, "_run_refresh", fake_run)
+    admin.JOB.update(status="idle", id=None, step=None, error=None, result=None)
+    admin._LAST_UPLOAD_AT["t"] = 0.0
+    try:
+        yield admin, calls
+    finally:
+        admin.JOB.update(status="idle", id=None, step=None, error=None, result=None)
+        admin._LAST_UPLOAD_AT["t"] = 0.0
+
+
+def _stops_csv() -> str:
+    return (ROOT / "dataset_hwaseong" / "stops_national_hwaseong.csv").read_text("utf-8-sig")
+
+
+def _payload(text: str, encoding: str = "utf-8-sig", **over) -> dict:
+    body = {"datasetId": "stopsNational", "filename": "stops.csv",
+            "contentB64": _b64.b64encode(text.encode(encoding)).decode(),
+            "reason": "테스트 업로드", "actor": "test"}
+    body.update(over)
+    return body
+
+
+def test_refresh_without_upload_id_is_unchanged(c, adm):
+    """uploadId 없는 갱신은 종전과 완전히 같아야 한다 — 배포된 프론트가 쓰는 경로."""
+    admin, calls = adm
+    r = c.post("/api/v1/admin/refresh", json={"steps": ["reload"], "reason": "x", "actor": "t"})
+    assert r.status_code == 200, r.text
+    assert calls[-1]["steps"] == ["reload"], "steps 가 서버에서 바뀌었다"
+    assert calls[-1]["apply"] is True, "uploadId 없는 갱신이 예행으로 떨어졌다 — 화면 반영이 죽는다"
+    assert calls[-1]["uploadId"] is None
+
+
+def test_refresh_full_chain_still_applies(c, adm):
+    """전체 체인도 여전히 실제 반영까지 간다."""
+    admin, calls = adm
+    r = c.post("/api/v1/admin/refresh",
+               json={"steps": ["join", "model", "validate", "load", "reload"], "reason": "x"})
+    assert r.status_code == 200, r.text
+    assert calls[-1]["apply"] is True
+    assert "load" in calls[-1]["steps"]
+
+
+def test_upload_is_404_when_disabled(c, adm, monkeypatch):
+    """킬 스위치가 꺼져 있으면 업로드는 존재하지 않는다."""
+    monkeypatch.setenv("HW_UPLOAD_ENABLED", "0")
+    r = c.post("/api/v1/admin/upload", json=_payload(_stops_csv()))
+    assert r.status_code == 404, r.text
+
+
+def test_upload_rejects_unknown_dataset(c, adm):
+    """화이트리스트 밖은 400 — 여기 없는 파일은 도달 자체가 불가능하다."""
+    r = c.post("/api/v1/admin/upload", json=_payload(_stops_csv(), datasetId="../../etc/passwd"))
+    assert r.status_code == 400, r.text
+
+
+def test_upload_rejects_wrong_header(c, adm):
+    """컬럼이 다르면 400 이고, 무엇이 다른지 화면에 띄울 수 있어야 한다."""
+    bad = _stops_csv().replace("정류장명", "정류소명", 1)
+    r = c.post("/api/v1/admin/upload", json=_payload(bad))
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "정류장명" in detail and "정류소명" in detail, f"진단 정보가 없다: {detail}"
+
+
+def test_upload_normalizes_cp949(c, adm):
+    """엑셀에서 저장한 cp949 가 utf-8-sig 로 정규화돼 저장돼야 한다 —
+    03_join 이 utf-8-sig 로 열기 때문에, 안 하면 파이프라인이 죽는다."""
+    admin, _ = adm
+    r = c.post("/api/v1/admin/upload", json=_payload(_stops_csv(), encoding="cp949"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["encodingConverted"] is True
+    assert body["rows"] == 3158
+    saved = (admin.VAR / body["uploadId"] / "stops_national_hwaseong.csv").read_bytes()
+    assert saved[:3] == b"\xef\xbb\xbf", "BOM 이 없다 — 파이프라인이 읽지 못한다"
+    assert "정류장명" in saved.decode("utf-8-sig").splitlines()[0]
+
+
+def test_upload_conflicts_while_job_running(c, adm):
+    """갱신 중에는 접수하지 않는다 — workers=1 이라 재계산이 CPU 를 잠식한다."""
+    admin, _ = adm
+    admin.JOB.update(status="running")
+    r = c.post("/api/v1/admin/upload", json=_payload(_stops_csv()))
+    assert r.status_code == 409, r.text
+
+
+def test_apply_is_locked_without_env(c, adm):
+    """라이브 반영은 따로 켜야 한다 — 기본은 검증(예행)까지만."""
+    admin, calls = adm
+    up = c.post("/api/v1/admin/upload", json=_payload(_stops_csv()))
+    assert up.status_code == 200, up.text
+    uid = up.json()["uploadId"]
+
+    denied = c.post("/api/v1/admin/refresh", json={"uploadId": uid, "apply": True, "reason": "x"})
+    assert denied.status_code == 409, denied.text
+
+    admin._LAST_UPLOAD_AT["t"] = 0.0
+    ok = c.post("/api/v1/admin/refresh", json={"uploadId": uid, "reason": "x"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["dryRun"] is True
+    assert calls[-1]["apply"] is False
+    assert calls[-1]["steps"] == ["join", "model", "validate"], "예행이 라이브 단계를 포함한다"
+
+
+def test_refresh_rejects_bad_upload_id(c, adm):
+    """uploadId 로 경로를 벗어날 수 없어야 한다."""
+    r = c.post("/api/v1/admin/refresh", json={"uploadId": "../../etc", "reason": "x"})
+    assert r.status_code == 400, r.text
+
+
+def test_upload_client_steps_are_ignored(c, adm):
+    """클라이언트가 일부 단계만 보내도 서버가 전체로 치환한다 —
+    부분 실행은 옛 세대끼리 정합해 게이트를 통과시킨 뒤 라이브를 자기모순으로 만든다."""
+    admin, calls = adm
+    up = c.post("/api/v1/admin/upload", json=_payload(_stops_csv()))
+    uid = up.json()["uploadId"]
+    r = c.post("/api/v1/admin/refresh",
+               json={"uploadId": uid, "steps": ["load"], "reason": "x"})
+    assert r.status_code == 200, r.text
+    assert calls[-1]["steps"] == ["join", "model", "validate"]

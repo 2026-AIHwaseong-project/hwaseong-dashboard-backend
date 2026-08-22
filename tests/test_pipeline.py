@@ -376,3 +376,51 @@ def test_model_output_is_reproducible(tmp_path):
             "04_model.py 재실행 결과가 커밋본과 다르다"
     finally:
         shutil.copy2(backup, target)
+
+
+# ── 산출물 교체 목록 정합 ──────────────────────────────────────────────────────
+#
+# 데이터 갱신은 스테이징에서 파이프라인을 돌린 뒤 `_STEP_OUT` 에 적힌 파일만
+# 라이브로 옮긴다. 스크립트가 쓰는 파일이 그 목록에서 빠지면 라이브가 **새 것과
+# 옛 것의 혼합**이 되고, 05_simulate 의 기준선 assert 로 서버가 아예 못 뜬다
+# (실제로 grid_metrics_we.csv 가 빠져 있었다 — 주말 지표만 옛것으로 남는 경로).
+#
+# 파일명을 하나씩 적어 두면 다음에 스크립트가 산출물을 늘릴 때 또 놓친다.
+# 그래서 **스크립트 소스에서 쓰기 대상을 직접 읽어** 목록과 대조한다.
+import re as _re
+
+_WRITE_TARGET = _re.compile(r'(?:D|D_DIR)\s*/\s*"([^"]+\.(?:csv|json))"')
+_WRITE_HINT = ('to_csv(', 'write_text(', '"w"', "'w'")
+
+
+def _script_outputs(script: str) -> set:
+    src = (ROOT / "analysis" / script).read_text("utf-8")
+    found = set()
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        if any(h in s for h in _WRITE_HINT):
+            found |= set(_WRITE_TARGET.findall(s))
+    return found
+
+
+@pytest.mark.parametrize("step,script", [
+    ("join", "03_join.py"),
+    ("model", "04_model.py"),
+    ("validate", "07_validate.py"),
+])
+def test_pipeline_outputs_are_all_swapped(step, script):
+    """각 단계가 실제로 쓰는 산출물이 전부 교체 목록에 있어야 한다."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from server import admin
+
+    declared = _script_outputs(script)
+    assert declared, f"{script} 에서 산출물을 찾지 못했습니다(정규식 확인 필요)"
+    swapped = {Path(rel).name for rel in admin._STEP_OUT[step]}
+    missing = declared - swapped
+    assert not missing, (
+        f"{script} 가 쓰는데 교체 목록에 없는 파일: {sorted(missing)}\n"
+        f"라이브가 세대 혼합이 되어 서버가 못 뜹니다 — server/admin.py 의 "
+        f"_STEP_OUT['{step}'] 에 추가하세요.")

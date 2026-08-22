@@ -31,11 +31,17 @@
   기준선 assert 로 서버가 아예 안 뜬다.
 """
 import asyncio
+import base64
 import collections
 import copy
+import csv
+import hashlib
 import hmac
+import io
 import json
 import os
+import re
+import secrets
 import shutil
 import sys
 import threading
@@ -176,6 +182,302 @@ BASELINE_DISPLAY = [
     ("MIN_FREQ_PER_H", "적정 판정 하한(회/h)", "2.0 — model.minFreqPerHour 와 동일 값(사본)."),
     ("HEADWAY_MULT", "(현재 적용) 증편 배수", "sim.headwayMult 오버라이드가 실제로 주입된 값."),
 ]
+
+
+# ─── 업로드 가능한 원본 데이터 ──────────────────────────────────────────────────
+#
+# **여기 없는 파일은 업로드로 도달할 수 없다.** 저장 경로는 아래 name 에서만 나오고
+# 사용자가 보낸 파일명은 화면 표시용으로만 쓴다 — `../` 경로 탈출이 문법적으로 불가능.
+#
+# 목록에 넣지 않은 이유(조사 결과):
+#   rail_stations.csv       04_model.py 에 'rail' 이 0회 — 올려도 격자 판정이 안 바뀐다
+#   routes.csv/route_stops  03_join 의 read_plus() 가 _plus 보강본을 우선해 읽지도 않는다
+#   od_quarter_wd/stop_emd  ARS 키 정규화가 양쪽 비대칭 — 엑셀 왕복 한 번에 매칭률이
+#                           0% 가 되면서도 모든 검증을 통과한다(조용히 틀리는 종류)
+#   grid_hwaseong/geojson   재생성에 SGIS 372MB 원본이 필요한데 서버에 없다
+#   파이프라인 산출물 전부   덮으면 즉시 세대 불일치 → 기준선 assert 로 서버가 못 뜬다
+DATASETS = {
+    "stopsNational": {
+        "name": "stops_national_hwaseong.csv",
+        "label": "정류장 대장(국가표준)",
+        "header": ["정류장번호", "정류장명", "위도", "경도", "정보수집일",
+                   "모바일단축번호", "도시코드", "도시명", "관리도시명"],
+        "keyCol": "정류장번호", "numCols": ["위도", "경도"], "dateCol": "정보수집일",
+        "minRows": 500, "maxBytes": 8 * 1024 * 1024,
+        "note": "정류장 수·좌표가 공급지수와 화면 KPI에 직접 반영됩니다.",
+    },
+    "flowHourly": {
+        "name": "flow_hourly.csv",
+        "label": "유동인구 시간대별",
+        "header": ["시군구코드", "시군구명", "시간코드", "외국인구분"]
+                  + [f"{g}{a}수" for g in ("남자", "여자")
+                     for a in ("0009", "1014", "1519", "2024", "2529", "3034",
+                               "3539", "4044", "4549", "5054", "5559", "6064", "6569")]
+                  + ["연도_월_일"],
+        "keyCol": "시군구코드", "numCols": ["시간코드"], "dateCol": "연도_월_일",
+        "minRows": 100, "maxBytes": 8 * 1024 * 1024,
+        "note": "잠재수요의 시간축 신호입니다.",
+    },
+    "boarding": {
+        "name": "boarding_hwaseong.csv",
+        "label": "정류소별 승하차 집계",
+        "header": ["승하차일자", "관할관청", "정류소ID", "정류소번호", "정류소명",
+                   "승차합계", "초승", "환승", "하차"],
+        "keyCol": "정류소번호", "numCols": ["초승", "승차합계"], "dateCol": "승하차일자",
+        "minRows": 10000, "maxBytes": 20 * 1024 * 1024,
+        "note": "대용량(약 19MB)입니다 — 회선이 느린 곳에서는 시간이 걸립니다.",
+    },
+}
+UPLOAD_ID_RE = re.compile(r"^upload-\d{8}-\d{6}-[0-9a-f]{8}$")
+UPLOAD_LOCK = asyncio.Lock()
+_LAST_UPLOAD_AT = {"t": 0.0}
+
+
+def upload_enabled() -> bool:
+    """기본 꺼짐. 매 요청 환경변수를 읽는다 — import 시점 상수로 굳히면
+    끄는 데 컨테이너 재기동(60~90초 다운)이 필요해지고 테스트도 못 한다."""
+    return os.environ.get("HW_UPLOAD_ENABLED", "0") == "1"
+
+
+def upload_apply_enabled() -> bool:
+    """올린 파일을 **라이브에 실제로 반영**하는 것까지 허용할지. 이것도 기본 꺼짐.
+    꺼져 있으면 검증(예행)까지만 되고 라이브 데이터는 한 바이트도 안 바뀐다."""
+    return os.environ.get("HW_UPLOAD_APPLY", "0") == "1"
+
+
+def _decode_upload(raw: bytes) -> tuple:
+    """업로드 바이트 → (텍스트, 인코딩 변환 여부).
+
+    한국 사용자가 엑셀에서 'CSV(쉼표로 분리)'로 저장하면 십중팔구 cp949 가 나오고,
+    그게 03_join 의 `encoding='utf-8-sig'` 에서 죽는 진짜 함정이다. 접수 시점에
+    utf-8-sig 로 정규화해 파이프라인 계약을 맞춘다.
+    """
+    if raw[:4] == b"PK\x03\x04":
+        raise HTTPException(400, "엑셀 파일(.xlsx)은 아직 지원하지 않습니다 — "
+                                 "엑셀에서 [다른 이름으로 저장] → CSV UTF-8 로 저장해 올려 주세요.")
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        raise HTTPException(400, "UTF-16(엑셀 '유니코드 텍스트') 파일입니다 — "
+                                 "[다른 이름으로 저장] → CSV UTF-8 로 저장해 주세요.")
+    if b"\x00" in raw[:8192]:
+        raise HTTPException(400, "텍스트 파일이 아닙니다(이진 데이터).")
+    try:
+        return raw.decode("utf-8-sig"), False
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode("cp949"), True
+    except UnicodeDecodeError:
+        raise HTTPException(400, "문자 인코딩을 알 수 없습니다 — CSV UTF-8 로 저장해 주세요.")
+
+
+def _scan_csv(text: str, spec: dict) -> dict:
+    """헤더 정확 일치 + 행수 + 표본 검사. **전량 파싱 금지** —
+    19MB 파일을 list(csv.reader(...)) 로 읽으면 메모리가 400MB 넘게 뛴다.
+    헤더만 읽고 이후로는 행 수만 세며 흘려보낸다."""
+    reader = csv.reader(io.StringIO(text, newline=""))
+    try:
+        header = [c.strip() for c in next(reader)]
+    except StopIteration:
+        raise HTTPException(400, "빈 파일입니다.")
+
+    want = spec["header"]
+    if header != want:
+        missing = [c for c in want if c not in header]
+        extra = [c for c in header if c not in want]
+        detail = f"컬럼이 다릅니다 — 기대 {len(want)}개 / 받음 {len(header)}개."
+        if missing:
+            detail += f" 없는 컬럼: {', '.join(missing[:6])}."
+        if extra:
+            detail += f" 모르는 컬럼: {', '.join(extra[:6])}."
+        if not missing and not extra:
+            detail += " 컬럼 순서가 다릅니다."
+        raise HTTPException(400, detail)
+
+    idx = {c: i for i, c in enumerate(header)}
+    rows = 0
+    bad_num = 0
+    dmin = dmax = None
+    di = idx.get(spec.get("dateCol") or "")
+    nums = [idx[c] for c in spec.get("numCols", []) if c in idx]
+    for row in reader:
+        if not row or len(row) != len(header):
+            continue
+        rows += 1
+        if rows <= 200:
+            for n in nums:
+                try:
+                    float(row[n])
+                except (ValueError, IndexError):
+                    bad_num += 1
+        if di is not None and row[di]:
+            v = row[di].strip()
+            dmin = v if dmin is None or v < dmin else dmin
+            dmax = v if dmax is None or v > dmax else dmax
+
+    if rows < spec["minRows"]:
+        raise HTTPException(400, f"행이 너무 적습니다 — {rows:,}행(최소 {spec['minRows']:,}행). "
+                                 "파일이 잘렸는지 확인해 주세요.")
+    if nums and bad_num > len(nums) * min(rows, 200) * 0.1:
+        raise HTTPException(400, f"숫자여야 할 칸에 숫자가 아닌 값이 많습니다"
+                                 f"({spec['numCols']} 표본 {bad_num}건). 컬럼이 밀렸는지 확인해 주세요.")
+    return {"rows": rows, "dateFrom": dmin, "dateTo": dmax}
+
+
+def _live_rows(spec: dict) -> Optional[int]:
+    """라이브 파일 행수 — 비교용. 큰 파일이라 폴링마다 세지 않도록 mtime 으로 캐시."""
+    p = ROOT / "dataset_hwaseong" / spec["name"]
+    if not p.exists():
+        return None
+    # 파일별로 한 칸씩 — 전체를 비우면 상태 폴링(1.2초)마다 30만 행짜리
+    # 승하차 파일을 다시 세게 된다.
+    key, stamp = str(p), p.stat().st_mtime_ns
+    hit = _LIVE_ROWS_CACHE.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    with open(p, encoding="utf-8-sig", newline="") as fh:
+        n = max(sum(1 for _ in fh) - 1, 0)
+    _LIVE_ROWS_CACHE[key] = (stamp, n)
+    return n
+
+
+_LIVE_ROWS_CACHE: dict = {}
+
+
+def _prune_uploads() -> None:
+    """upload-* 정리 — **나이 기준**(2시간)이 먼저, 개수 상한은 보조.
+
+    개수 기준만 쓰면 더미 몇 개를 연달아 올려 발표자가 확인창을 띄워 둔 사이
+    그 uploadId 를 밀어낼 수 있다. 접두어는 반드시 upload-* — stage-* 를 쓰면
+    _prune_dirs("stage-*", keep=0) 이 갱신마다 통째로 지운다.
+    """
+    now = time.time()
+    for d in sorted(VAR.glob("upload-*")):
+        try:
+            if now - d.stat().st_mtime > 7200:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+    for d in sorted(VAR.glob("upload-*"))[:-10]:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _accept_upload(req, spec: dict) -> dict:
+    """디코드 → 검증 → var/upload-*/ 격리 저장. 스레드에서 돈다(CPU 작업).
+    **라이브 데이터는 이 함수 어디에서도 건드리지 않는다.**"""
+    try:
+        raw = base64.b64decode(req.contentB64, validate=True)
+    except Exception:
+        raise HTTPException(400, "파일을 읽지 못했습니다(전송이 손상됐을 수 있습니다).")
+    if len(raw) > spec["maxBytes"]:
+        raise HTTPException(413, f"파일이 너무 큽니다 — 최대 {spec['maxBytes'] // 1048576}MB 까지입니다.")
+
+    text, converted = _decode_upload(raw)
+    scan = _scan_csv(text, spec)
+
+    live_rows = _live_rows(spec)
+    warnings = []
+    if live_rows:
+        delta = (scan["rows"] - live_rows) / live_rows
+        if abs(delta) > 0.5:
+            warnings.append(f"행 수가 기존 대비 {delta * 100:+.0f}% 변했습니다 "
+                            f"({live_rows:,} → {scan['rows']:,}행) — 파일이 맞는지 확인해 주세요.")
+
+    body = text.encode("utf-8-sig")     # 03_join 이 utf-8-sig 로 여는 계약을 여기서 맞춘다
+    _prune_uploads()
+    uid = f"upload-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
+    d = VAR / uid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / spec["name"]).write_bytes(body)
+    meta = {"uploadId": uid, "datasetId": req.datasetId, "name": spec["name"],
+            "originalFilename": (req.filename or "")[:200], "label": spec["label"],
+            "sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body),
+            "rows": scan["rows"], "dateFrom": scan["dateFrom"], "dateTo": scan["dateTo"],
+            "encodingConverted": converted, "reason": req.reason.strip(),
+            "actor": req.actor, "at": _now()}
+    (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+    return {**meta, "liveRows": live_rows, "warnings": warnings,
+            "note": spec.get("note", ""), "applyEnabled": upload_apply_enabled()}
+
+
+def _overlay_upload(stage: Path, upload_id: str) -> dict:
+    """올린 원본을 **스테이지에만** 얹는다.
+
+    var/ 는 호스트 바인드 마운트라 밖에서 바꿀 수 있으므로 접수 때 기록한 해시를
+    다시 대조한다. 그리고 **조용한 스킵은 절대 금지** — 못 얹었는데 파이프라인이
+    그대로 돌면 "올렸는데 아무것도 안 바뀐다"가 되어 원인을 찾을 수 없다.
+    """
+    d = VAR / upload_id
+    mp = d / "meta.json"
+    if not mp.exists():
+        raise RuntimeError(f"업로드 {upload_id} 를 찾을 수 없습니다(보관 기간이 지났을 수 있습니다)")
+    meta = json.loads(mp.read_text("utf-8"))
+    spec = DATASETS.get(meta.get("datasetId"))
+    if spec is None or meta.get("name") != spec["name"]:
+        raise RuntimeError("업로드 정보가 올바르지 않습니다")
+    src = d / spec["name"]
+    if not src.exists():
+        raise RuntimeError(f"업로드 파일이 없습니다: {spec['name']}")
+    if hashlib.sha256(src.read_bytes()).hexdigest() != meta.get("sha256"):
+        raise RuntimeError("업로드 파일이 접수 이후 변경됐습니다 — 다시 올려 주세요")
+    shutil.copy2(src, stage / "dataset_hwaseong" / spec["name"])
+    _log(f"[업로드] {spec['label']} — {spec['name']} {meta.get('rows', 0):,}행을 스테이지에 반영")
+    return meta
+
+
+def _grid_rows(p: Path) -> dict:
+    if not p.exists():
+        return {}
+    with open(p, encoding="utf-8-sig", newline="") as fh:
+        return {(r["grid_id"], r["period"]): r for r in csv.DictReader(fh)}
+
+
+def _dry_run_diff(stage: Path, upload_meta: Optional[dict]) -> dict:
+    """스테이지 산출물과 라이브를 비교한다 — 스테이지가 지워지기 전에 뽑아야 한다.
+
+    **사각지대 칸 수는 쓰지 않는다.** norm_stats 가 매 실행 재발행돼 z 가 다시
+    중심화되므로 데이터를 크게 흔들어도 칸 수는 거의 안 움직인다(측정: 승차량을
+    전부 1.5배로 올려도 출근 30 → 29). 실제로 움직이는 것은 **어느 격자가 어떤
+    판정을 받았는가**와 우선순위 순서다.
+    """
+    out: dict = {"quadrantChanged": None, "topRegions": None, "cvLogR2": None}
+    try:
+        live = _grid_rows(ROOT / "dataset_hwaseong" / "grid_metrics.csv")
+        new = _grid_rows(stage / "dataset_hwaseong" / "grid_metrics.csv")
+        common = set(live) & set(new)
+        out["comparedCells"] = len(common)
+        out["quadrantChanged"] = sum(
+            1 for k in common if live[k].get("quadrant") != new[k].get("quadrant"))
+
+        def _top(rows: dict, period: str = "am", n: int = 5) -> list:
+            cand = [r for k, r in rows.items() if k[1] == period]
+            cand.sort(key=lambda r: float(r.get("priority") or 0), reverse=True)
+            seen, top = set(), []
+            for r in cand:
+                reg = r.get("region") or "-"
+                if reg not in seen:
+                    seen.add(reg)
+                    top.append(reg)
+                if len(top) >= n:
+                    break
+            return top
+
+        out["topRegions"] = {"before": _top(live), "after": _top(new)}
+    except Exception as e:
+        _log(f"비교 산출 일부 실패(무시): {type(e).__name__}: {e}")
+
+    try:
+        vj = json.loads((stage / "dataset_hwaseong" / "validation.json").read_text("utf-8"))
+        lj = json.loads((ROOT / "dataset_hwaseong" / "validation.json").read_text("utf-8"))
+        out["cvLogR2"] = {"before": (lj.get("r2") or {}).get("cv_log"),
+                          "after": (vj.get("r2") or {}).get("cv_log")}
+    except Exception:
+        pass
+
+    if upload_meta:
+        out["upload"] = {k: upload_meta.get(k) for k in
+                         ("uploadId", "label", "name", "rows", "dateFrom", "dateTo",
+                          "sha256", "encodingConverted", "originalFilename")}
+    return out
 
 
 # ─── 오버라이드 저장소 ──────────────────────────────────────────────────────────
@@ -380,7 +682,11 @@ _STEP_SCRIPT = {"join": "03_join.py", "model": "04_model.py",
 # 각 단계가 갱신하는 라이브 파일 — 스테이징 성공 후 이것만 원자 교체한다.
 _STEP_OUT = {
     "join": ["dataset_hwaseong/stops_hwaseong.csv", "dataset_hwaseong/grid_join.csv"],
-    "model": ["dataset_hwaseong/grid_metrics.csv", "dataset_hwaseong/norm_stats.json"],
+    # grid_metrics_we.csv 를 빼면 라이브가 "새 기준선 + 옛 주말 지표" 혼합이 되고
+    # 05_simulate.py 의 `[we] 기준선 불일치` assert 로 서버가 못 뜬다(크래시 루프).
+    # 04_model.py 가 쓰는 산출물과 이 목록이 어긋나지 않는지 tests 가 검사한다.
+    "model": ["dataset_hwaseong/grid_metrics.csv", "dataset_hwaseong/grid_metrics_we.csv",
+              "dataset_hwaseong/norm_stats.json"],
     "validate": ["dataset_hwaseong/validation.json"],
 }
 
@@ -431,10 +737,13 @@ def _prune_dirs(pattern: str, keep: int) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
-async def _run_refresh(steps: list, reason: str, actor: str) -> None:
+async def _run_refresh(steps: list, reason: str, actor: str,
+                       upload_id: Optional[str] = None, apply: bool = True) -> None:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     pipeline_steps = [s for s in ("join", "model", "validate", "load") if s in steps]
     stage = None
+    upload_meta: Optional[dict] = None
+    backup_path: Optional[Path] = None
     try:
         before_kpi = (_ctx["DATA"].get("grid_am") or {}).get("kpi", {}).get("needCells")
 
@@ -455,6 +764,10 @@ async def _run_refresh(steps: list, reason: str, actor: str) -> None:
             spec_file = ROOT / "dataset_hwaseong" / "grid_spec.json"
             if spec_file.exists():
                 shutil.copy2(spec_file, stage / "dataset_hwaseong" / "grid_spec.json")
+
+            # 1-b) 올린 원본을 스테이지에만 얹는다 — 라이브는 그대로다.
+            if upload_id:
+                upload_meta = await asyncio.to_thread(_overlay_upload, stage, upload_id)
 
             # 2) 파이프라인 실행 (각 스크립트 말미 assert 가 검증 게이트)
             for s in pipeline_steps:
@@ -479,15 +792,60 @@ async def _run_refresh(steps: list, reason: str, actor: str) -> None:
             if proc.returncode != 0:
                 raise RuntimeError("시뮬 기준선 게이트 실패 — 산출물을 반영하지 않습니다")
 
-            # 4) 백업 → 5) 파일별 원자 교체 (dataset 과 static 을 한 쌍으로)
+            # 4) 예행이면 여기서 끝낸다 — 백업·교체·재적재를 전부 건너뛴다.
+            #    스테이지는 finally 에서 지워지므로 비교는 **지금** 뽑아야 한다.
+            if not apply:
+                JOB["step"] = "diff"
+                _log("── 예행 — 라이브는 바꾸지 않고 결과만 비교합니다")
+                dry = await asyncio.to_thread(_dry_run_diff, stage, upload_meta)
+                dry["dryRun"] = True
+                JOB.update(status="done", result=dry, finishedAt=_now(), step=None)
+                _log(f"예행 완료 — 판정이 바뀐 격자 {dry.get('quadrantChanged')}개 "
+                     f"/ {dry.get('comparedCells')}개 · 라이브 데이터는 변경되지 않았습니다")
+                _append_history({"kind": "upload.dryrun", "jobId": JOB["id"], "ok": True,
+                                 "uploadId": upload_id, "reason": reason,
+                                 "result": dry, "actor": actor})
+                return
+
+            # 5) 백업 → 6) 파일별 원자 교체 (dataset 과 static 을 한 쌍으로)
             JOB["step"] = "swap"
             swap: list = []
             for s in pipeline_steps:
                 swap += _STEP_OUT.get(s, [])
+            if upload_meta:
+                # 원본도 함께 교체하지 않으면 파생물만 새것이 되고, 다음 갱신에서
+                # 옛 원본으로 조용히 되돌아간다 — 재현이 안 되는 종류의 사고다.
+                swap += [f"dataset_hwaseong/{upload_meta['name']}"]
             if "load" in pipeline_steps:
-                swap += [f"server/static/{p.name}"
-                         for p in (stage / "server" / "static").glob("*.json")]
+                stage_static = {p.name for p in (stage / "server" / "static").glob("*.json")}
+                live_static = {p.name for p in (ROOT / "server" / "static").glob("*.json")}
+                # 05_load 는 주말 입력이 없으면 *_we.json 을 print 만 하고 건너뛴 채
+                # 종료코드 0 으로 끝난다. 그대로 교체하면 화면이 평일=새것 / 주말=옛것으로
+                # 조용히 갈린다 — 빠진 게 있으면 아예 교체하지 않는다.
+                missing = live_static - stage_static
+                if missing:
+                    raise RuntimeError(
+                        f"스테이지에 계약 JSON {len(missing)}개가 없습니다"
+                        f"({', '.join(sorted(missing)[:5])}) — 세대가 갈리므로 교체하지 않습니다")
+                swap += [f"server/static/{n}" for n in sorted(stage_static)]
+
+            # 교체 도중 디스크가 차면 앞쪽만 새것이 되어 세대 불일치로 서버가 못 뜬다.
+            # 백업본과 .new 임시본까지 감안해 넉넉히 잡고, 모자라면 **교체를 시작하기
+            # 전에** 멈춘다(라이브 무변경).
+            need = sum((stage / rel).stat().st_size for rel in swap if (stage / rel).exists())
+            free = shutil.disk_usage(ROOT).free
+            if free < need * 3:
+                raise RuntimeError(
+                    f"디스크 여유 부족 — 약 {need * 3 // 1048576}MB 필요, 현재 "
+                    f"{free // 1048576}MB. 교체를 시작하지 않았습니다(라이브 무변경)")
+
+            # 이전 실패가 남긴 .new 고아 정리 — 남겨두면 이후 copytree 마다 얹힌다.
+            for _d in (ROOT / "dataset_hwaseong", ROOT / "server" / "static"):
+                for _orphan in _d.glob("*.new"):
+                    _orphan.unlink(missing_ok=True)
+
             backup = VAR / f"backup-{ts}"
+            backup_path = backup
             backup.mkdir(parents=True, exist_ok=True)
             for rel in swap:
                 live = ROOT / rel
@@ -496,14 +854,37 @@ async def _run_refresh(steps: list, reason: str, actor: str) -> None:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(live, dst)
             _log(f"백업 {len(swap)}개 → {backup}")
-            for rel in swap:
-                # stage(var/, 도커에선 바인드 마운트)와 ROOT 는 다른 파일시스템일 수
-                # 있어 os.replace 직행은 EXDEV 로 죽는다. 목적지와 같은 디렉토리에
-                # .new 로 복사한 뒤 replace — 원자성은 목적지 fs 안에서 성립한다.
-                live = ROOT / rel
-                tmp = live.with_name(live.name + ".new")
-                shutil.copy2(stage / rel, tmp)
-                os.replace(tmp, live)
+
+            # 파일 하나하나는 원자적이지만 **집합 전체는 아니다.** 중간에 죽으면 앞쪽만
+            # 새것이 되어 05_simulate 의 기준선 assert 로 서버가 못 뜬다 — 이미 바꾼
+            # 것만 백업에서 되돌려 라이브를 한 세대로 유지한다.
+            done_rel: list = []
+            try:
+                for rel in swap:
+                    # stage(var/, 도커에선 바인드 마운트)와 ROOT 는 다른 파일시스템일 수
+                    # 있어 os.replace 직행은 EXDEV 로 죽는다. 목적지와 같은 디렉토리에
+                    # .new 로 복사한 뒤 replace — 원자성은 목적지 fs 안에서 성립한다.
+                    live = ROOT / rel
+                    tmp = live.with_name(live.name + ".new")
+                    shutil.copy2(stage / rel, tmp)
+                    os.replace(tmp, live)
+                    done_rel.append(rel)
+            except Exception as e:
+                _log(f"⚠ 교체 실패({type(e).__name__}) — {len(done_rel)}개 되돌리는 중")
+                for rel in reversed(done_rel):
+                    live = ROOT / rel
+                    src = backup / rel
+                    try:
+                        if src.exists():
+                            tmp = live.with_name(live.name + ".rb")
+                            shutil.copy2(src, tmp)
+                            os.replace(tmp, live)
+                        else:
+                            live.unlink(missing_ok=True)   # 교체 전 라이브에 없던 파일
+                    except Exception as re:
+                        _log(f"⚠ {rel} 되돌리기 실패: {type(re).__name__}: {re}")
+                _log("되돌리기 완료 — 라이브는 교체 전 상태입니다")
+                raise RuntimeError(f"원자 교체 실패, 되돌렸습니다: {type(e).__name__}: {e}")
             _log(f"원자 교체 {len(swap)}개 완료")
 
         # DB 재적재 — 명시 요청("db")했거나, DB 모드에서 계약 JSON 을 새로
@@ -532,6 +913,18 @@ async def _run_refresh(steps: list, reason: str, actor: str) -> None:
         _log(f"완료 — needCells(am) {before_kpi} → {result.get('needCellsAm')}")
         _append_history({"kind": "refresh.done", "jobId": JOB["id"], "ok": True,
                          "steps": steps, "result": result, "actor": actor})
+        if upload_meta and backup_path is not None:
+            # 되돌리는 명령을 **이력에 문자열 그대로** 남긴다. 무대에서 이게 있는
+            # 것과 없는 것이 3분과 30분을 가른다(backup-* 는 5회까지만 보관).
+            restore = (f"docker compose exec api sh -c 'cp -f {backup_path}/dataset_hwaseong/* "
+                       f"/app/dataset_hwaseong/ && cp -f {backup_path}/server/static/*.json "
+                       f"/app/server/static/'")
+            _log(f"되돌리려면: {restore}")
+            _append_history({"kind": "upload.apply", "jobId": JOB["id"], "ok": True,
+                             "uploadId": upload_id, "reason": reason, "actor": actor,
+                             "file": upload_meta.get("name"), "rows": upload_meta.get("rows"),
+                             "sha256": (upload_meta.get("sha256") or "")[:10],
+                             "backup": str(backup_path), "restore": restore})
     except Exception as e:
         JOB.update(status="failed", error=f"{type(e).__name__}: {e}", finishedAt=_now(), step=None)
         _log(f"실패: {JOB['error']}")
@@ -666,28 +1059,104 @@ class RefreshRequest(BaseModel):
     steps: list = ["reload"]
     reason: str = ""
     actor: str = "admin"
+    # 아래 둘은 업로드 경로 전용이다. uploadId 가 없으면 이 엔드포인트는
+    # **종전과 100% 동일하게** 동작해야 한다 — 배포된 프론트는 {steps, reason,
+    # actor} 만 보내므로, apply 기본값을 그대로 분기에 쓰면 [모델 재계산]이
+    # 결과를 버리고 [화면 반영]이 무동작이 된다(완료 토스트는 그대로 떠서
+    # 실패로 보이지도 않는다).
+    uploadId: Optional[str] = None
+    apply: bool = False
 
 
 @router.post("/refresh")
 async def start_refresh(req: RefreshRequest, _w=Depends(require_write)):
     if JOB["status"] == "running":
         raise HTTPException(409, "이미 갱신이 진행 중입니다.")
+
+    steps = list(req.steps)
+    do_apply = True                      # uploadId 없는 기존 경로는 항상 실제 반영
+    if req.uploadId:
+        if not upload_enabled():
+            raise HTTPException(404, "업로드가 켜져 있지 않습니다.")
+        if not UPLOAD_ID_RE.match(req.uploadId):
+            raise HTTPException(400, "uploadId 형식이 올바르지 않습니다.")
+        updir = VAR / req.uploadId
+        if updir.parent != VAR or not (updir / "meta.json").exists():
+            raise HTTPException(400, "업로드를 찾을 수 없습니다 — 다시 올려 주세요.")
+        do_apply = bool(req.apply)
+        if do_apply and not upload_apply_enabled():
+            raise HTTPException(409, "이 서버는 검증(예행)까지만 열려 있습니다 — "
+                                     "라이브 반영은 따로 켜야 합니다.")
+        # 단계는 **서버가 정한다.** 클라이언트가 일부만 보내면 옛 세대끼리 정합해
+        # 게이트를 통과한 뒤 라이브가 '새 원본 + 옛 지표' 자기모순이 되는데,
+        # 그래도 서버는 정상 기동해 아무도 눈치채지 못한다.
+        steps = (["join", "model", "validate", "load", "reload"] if do_apply
+                 else ["join", "model", "validate"])
+
     valid = {"join", "model", "validate", "load", "db", "reload"}
-    bad = [s for s in req.steps if s not in valid]
+    bad = [s for s in steps if s not in valid]
     if bad:
         raise HTTPException(400, f"steps 에 알 수 없는 단계가 있습니다: {bad} (허용: {sorted(valid)})")
-    if not req.steps:
+    if not steps:
         raise HTTPException(400, "steps 가 비어 있습니다.")
-    if "db" in req.steps and not os.environ.get("DATABASE_URL"):
+    if "db" in steps and not os.environ.get("DATABASE_URL"):
         raise HTTPException(400, "DATABASE_URL 이 없어 db 단계를 실행할 수 없습니다.")
 
-    JOB.update(id=f"RF-{int(time.time())}", status="running", steps=req.steps,
+    JOB.update(id=f"RF-{int(time.time())}", status="running", steps=steps,
                step="queued", startedAt=_now(), finishedAt=None, error=None, result=None)
     JOB["log"].clear()
-    _append_history({"kind": "refresh.start", "jobId": JOB["id"], "steps": req.steps,
-                     "reason": req.reason, "actor": req.actor})
-    asyncio.get_running_loop().create_task(_run_refresh(req.steps, req.reason, req.actor))
-    return {"ok": True, "jobId": JOB["id"], "steps": req.steps}
+    _append_history({"kind": "refresh.start", "jobId": JOB["id"], "steps": steps,
+                     "reason": req.reason, "actor": req.actor,
+                     "uploadId": req.uploadId, "apply": do_apply})
+    asyncio.get_running_loop().create_task(
+        _run_refresh(steps, req.reason, req.actor, upload_id=req.uploadId, apply=do_apply))
+    return {"ok": True, "jobId": JOB["id"], "steps": steps, "dryRun": not do_apply}
+
+
+class UploadRequest(BaseModel):
+    datasetId: str
+    filename: str = ""
+    contentB64: str
+    reason: str = ""
+    actor: str = "admin"
+
+
+@router.post("/upload")
+async def upload_dataset(req: UploadRequest, _w=Depends(require_write)):
+    """원본 CSV 접수 — 받아서 검증하고 격리 보관한 뒤 리포트만 돌려준다.
+
+    **이 단계에서 라이브 데이터는 한 바이트도 바뀌지 않는다.** 실제 반영은
+    /refresh 가 uploadId 를 들고 왔을 때만, 그것도 예행이 기본이다.
+    """
+    if not upload_enabled():
+        raise HTTPException(404, "업로드가 켜져 있지 않습니다.")
+    if JOB["status"] == "running":
+        raise HTTPException(409, "데이터 갱신이 진행 중입니다 — 끝난 뒤 올려 주세요.")
+
+    spec = DATASETS.get(req.datasetId)
+    if spec is None:
+        raise HTTPException(400, f"올릴 수 없는 대상입니다 (허용: {', '.join(DATASETS)})")
+    if len(req.reason.strip()) < 5:
+        raise HTTPException(400, "왜 올리는지 5자 이상 적어 주세요. 이력에 남습니다.")
+    # base64 는 원본의 약 4/3 배. 디코드 전에 먼저 자른다.
+    if len(req.contentB64) > (spec["maxBytes"] * 4 // 3) + 4096:
+        raise HTTPException(413, f"파일이 너무 큽니다 — 최대 {spec['maxBytes'] // 1048576}MB 까지입니다.")
+
+    # 연타 방지 — **첫 await 이전에** 동기적으로 갱신한다. await 사이에 창이 열리면
+    # 동시 요청이 둘 다 통과한다(save_params 가 같은 이유로 같은 형태를 쓴다).
+    now = time.monotonic()
+    if now - _LAST_UPLOAD_AT["t"] < 10:
+        raise HTTPException(429, "잠시 후 다시 시도해 주세요.")
+    _LAST_UPLOAD_AT["t"] = now
+
+    async with UPLOAD_LOCK:
+        info = await asyncio.to_thread(_accept_upload, req, spec)
+    _append_history({"kind": "upload.accept", "uploadId": info["uploadId"],
+                     "datasetId": req.datasetId, "file": info["name"],
+                     "rows": info["rows"], "bytes": info["bytes"],
+                     "sha256": info["sha256"][:10], "reason": info["reason"],
+                     "actor": req.actor})
+    return {"ok": True, **info}
 
 
 @router.get("/status")
@@ -715,7 +1184,55 @@ def get_status():
                 "varDirWritable": writable,
                 "authRequired": auth_required(),
                 "writeLocked": auth_required()},
+        # 새 GET 을 만들지 않는다 — 상태는 이미 화면이 읽고 있어 배선이 공짜다.
+        "upload": {
+            "enabled": upload_enabled(),
+            "applyEnabled": upload_apply_enabled(),
+            "targets": _upload_targets() if upload_enabled() else [],
+            "last": _last_upload(),
+        },
+        # 지금은 화면에도 로그에도 없어서, 디스크가 찼다는 사실이 교체 도중에야
+        # 드러난다. 시연 전에 눈으로 확인할 수 있게 함께 싣는다.
+        "disk": _disk_info(),
     }
+
+
+def _upload_targets() -> list:
+    out = []
+    for k, v in DATASETS.items():
+        try:
+            live = _live_rows(v)
+        except OSError:
+            live = None
+        out.append({"id": k, "label": v["label"], "name": v["name"],
+                    "columns": len(v["header"]), "minRows": v["minRows"],
+                    "maxBytes": v["maxBytes"], "note": v.get("note", ""),
+                    "liveRows": live})
+    return out
+
+
+def _last_upload() -> Optional[dict]:
+    dirs = sorted(VAR.glob("upload-*"))
+    for d in reversed(dirs):
+        try:
+            m = json.loads((d / "meta.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        return {"uploadId": m.get("uploadId"), "label": m.get("label"),
+                "file": m.get("originalFilename") or m.get("name"),
+                "rows": m.get("rows"), "at": m.get("at"),
+                "sha256": (m.get("sha256") or "")[:10]}
+    return None
+
+
+def _disk_info() -> dict:
+    try:
+        du = shutil.disk_usage(ROOT)
+        var_used = sum(f.stat().st_size for f in VAR.rglob("*") if f.is_file())
+        return {"freeMb": du.free // 1048576, "totalMb": du.total // 1048576,
+                "varUsedMb": var_used // 1048576}
+    except OSError:
+        return {}
 
 
 @router.get("/history")
