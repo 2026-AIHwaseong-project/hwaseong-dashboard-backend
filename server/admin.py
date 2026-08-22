@@ -547,7 +547,7 @@ def _param_rows() -> list:
         val = getattr(sim, attr, None) if sim is not None else None
         rows.append({"key": f"baseline.{attr}", "label": label, "unit": "", "type": "float",
                      "min": None, "max": None, "scope": "baseline", "group": "baseline",
-                     "editable": False, "requiresRefresh": True,
+                     "editable": False, "requiresRefresh": True, "pending": False,
                      "default": val, "override": None, "effective": val,
                      "overridden": False, "reason": None, "actor": None, "at": None,
                      "note": note, "applies": "기준선(D·S·MI) — 편집은 새 기준선 발행 절차로만"})
