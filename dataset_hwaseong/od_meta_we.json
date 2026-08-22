@@ -2,11 +2,13 @@
  "date": "20260530",
  "top_n": 10,
  "pairs": 100,
- "pairs_with_data": 65,
- "pairs_empty": 9,
- "pairs_error": 26,
- "rows": 2305,
- "total_trips": 16966,
+ "pairs_resolved": 100,
+ "pairs_remaining": 0,
+ "pairs_with_data": 88,
+ "pairs_empty": 12,
+ "pairs_error_this_run": 0,
+ "rows": 3077,
+ "total_trips": 20460,
  "stop_coverage": 0.237,
  "sgg_used": [
   "41591",
@@ -15,5 +17,5 @@
   "41597"
  ],
  "caveat": "상위 10개 동 전조합만 받았다. 화성시 전체 통행량이 아니다. 전수는 188x188=35,344 쌍이라 하루 10,000회 제한을 넘는다.",
- "built": "2026-08-23 03:05"
+ "built": "2026-08-23 05:27"
 }
