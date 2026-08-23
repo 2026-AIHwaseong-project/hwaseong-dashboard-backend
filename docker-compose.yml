@@ -65,7 +65,9 @@ services:
       POSTGRES_USER: hw
       POSTGRES_PASSWORD: hw_pass
     ports:
-      - "5432:5432"
+      # api 는 compose 네트워크로 붙으므로 외부 노출이 필요 없습니다.
+      # 보안그룹이 막고 있긴 하지만, 자격증명이 hw/hw_pass 라 한 겹 더 둡니다.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # 빈 데이터 디렉터리로 처음 뜰 때만 실행됩니다. 스키마를 고친 뒤에는
