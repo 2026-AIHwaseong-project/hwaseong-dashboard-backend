@@ -29,23 +29,50 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
+          # set -eu 가 없으면 앞줄이 죽어도 다음 줄이 계속 돈다. 실제로
+          # `git pull` 이 실패해도 그 아래 docker compose 가 **옛 소스로** 돌고
+          # 잡은 초록불로 끝났다 — 실패가 성공으로 보이는 가장 나쁜 형태다.
           script: |
+            set -eu
             cd /home/ubuntu/hw/hwaseong-dashboard-backend
-            git pull
+
+            # pull 대신 fetch + ff-only. 히스토리가 갈리거나 서버 작업트리에
+            # 덮어쓸 변경이 있으면 **여기서 크게 실패한다**(조용히 넘어가지 않는다).
+            git fetch origin
+            git merge --ff-only origin/main
+            echo "배포 대상: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
+
             docker compose up -d --build
 
-      # `docker compose up -d` 는 컨테이너가 **뜨자마자** 돌아온다. 앱은 시뮬 엔진
-      # import 에 15~20초를 더 쓰고, 기준선 assert 에 걸리면 그 뒤에 죽는다.
-      # 확인이 없으면 서버가 크래시 루프에 빠져도 이 잡은 초록불로 끝난다.
-      - name: 배포 확인 — API 가 실제로 응답하는가
+            # `up -d` 는 컨테이너가 **뜨자마자** 돌아온다. 앱은 시뮬 엔진 import 에
+            # 15~20초를 더 쓰고, 기준선 assert 에 걸리면 그 뒤에 죽는다.
+            # compose 에 이미 healthcheck 가 있으므로 그것이 healthy 가 될 때까지
+            # 기다린다 — 기다리지 않으면 아래 외부 확인이 **아직 살아 있는 옛
+            # 컨테이너**의 응답을 받고 통과한다(실제로 배포 잡이 16초에 끝나고 있었다).
+            cid=$(docker compose ps -q api)
+            for i in $(seq 1 36); do
+              st=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo none)
+              [ "$st" = "healthy" ] && break
+              sleep 5
+            done
+            if [ "$st" != "healthy" ]; then
+              echo "컨테이너가 healthy 가 되지 못했습니다 (마지막 상태: $st)"
+              docker compose logs --tail 60 api
+              exit 1
+            fi
+            echo "컨테이너 healthy 확인"
+
+      # 위에서 컨테이너 자체는 확인했다. 여기서는 **Caddy 를 지나는 실제 경로**가
+      # 사는지 본다(인증서·프록시 문제는 컨테이너가 멀쩡해도 생긴다).
+      - name: 배포 확인 — 공개 주소가 실제로 응답하는가
         run: |
-          for i in $(seq 1 15); do
+          for i in $(seq 1 10); do
             if curl -fsS -o /dev/null --max-time 10 https://15-165-83-80.sslip.io/api/v1/meta; then
-              echo "배포 확인 완료 (${i}회차)"
+              echo "공개 주소 확인 완료 (${i}회차)"
               exit 0
             fi
-            echo "대기 중… (${i}/15)"
+            echo "대기 중… (${i}/10)"
             sleep 10
           done
-          echo "::error::배포 후 150초 동안 /api/v1/meta 가 응답하지 않았습니다. 컨테이너가 기동에 실패했을 수 있습니다 — docker compose logs api 를 확인하세요."
+          echo "::error::컨테이너는 healthy 인데 공개 주소가 응답하지 않습니다 — Caddy 를 확인하세요."
           exit 1
