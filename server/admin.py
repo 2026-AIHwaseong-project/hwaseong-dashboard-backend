@@ -136,18 +136,32 @@ SPECS = {
                               note="화면은 자체 기본 10건을 명시 전송한다 — 이 값은 API 직접 호출과 "
                                    "향후 화면 연동에 적용.",
                               applies="maxPlacements 미지정 추천 요청의 기본값"),
+    # ── 아래 둘은 **읽기 전용**이다(locked). 화면에는 값과 근거를 그대로 보여주되
+    #    콘솔로 저장할 수 없다.
+    #
+    #    저장하면 오버라이드 파일에 값이 남고, 그 파일은 var/ 바인드 마운트라
+    #    재배포를 넘어 살아남는다. 다음 기동에서 analysis/params.py 가 그 값을
+    #    읽어 상수를 덮는데, 격자 산출물(grid_metrics.csv)은 옛 값으로 구워져
+    #    있으므로 05_simulate 의 `quad 불일치` assert 에 걸려 **서버가 아예 뜨지
+    #    않는다**(restart: unless-stopped 라 크래시 루프). 서버가 죽으면 콘솔로는
+    #    되돌릴 수 없어 호스트에서 파일을 지우는 수밖에 없다.
+    #
+    #    "저장 → 재계산" 순서를 지키면 정합해지지만, 그 사이에 재기동이 한 번만
+    #    끼어도 사고가 난다. 재계산 경로가 오버라이드를 안전하게 반영하도록
+    #    정리되기 전까지는 열지 않는다.
     "model.busTripRate": dict(label="인구→통행 환산계수", unit="통행/인·일", type="float",
                               min=0.05, max=1.0, default=0.25,
-                              scope="pipeline", group="model",
+                              scope="pipeline", group="model", locked=True,
                               note="전수단 원단위 2.5 × 버스 분담률 0.10 — 가정값. "
-                                   "격자 JSON 에 구워지므로 재계산 경로가 오버라이드를 읽는 "
-                                   "단계(P3)에서 개방.",
-                              applies="잠재수요 KPI(flowTripsPerDay) — 재계산 필요"),
+                                   "격자 JSON 에 구워지는 값이라 파이프라인을 다시 돌려야 "
+                                   "바뀝니다.",
+                              applies="잠재수요 KPI(flowTripsPerDay) — 읽기 전용"),
     "model.minFreqPerHour": dict(label="적정 판정 절대 하한", unit="회/h", type="float",
                                  min=0.5, max=6.0, default=2.0,
-                                 scope="pipeline", group="model",
-                                 note="야간 상대평가 오라벨 방지 가드. 재계산 필요 — P3 개방.",
-                                 applies="사분면 적정/과잉 판정 — 재계산 필요"),
+                                 scope="pipeline", group="model", locked=True,
+                                 note="야간 상대평가 오라벨 방지 가드. 격자 산출물에 구워지는 "
+                                      "값이라 파이프라인을 다시 돌려야 바뀝니다.",
+                                 applies="사분면 적정/과잉 판정 — 읽기 전용"),
 }
 
 # 기본값 동기화 — SPECS 의 리터럴이 params.py 와 갈라지지 않게 정본에서 덮는다.
@@ -165,16 +179,18 @@ for _k, _v in _DEFAULT_SRC.items():
 
 # C계급 — 기준선에 구워진 상수. 표시 전용(살아있는 시뮬 모듈에서 읽는다).
 #   (attr, label, note)
+# 값은 화면이 왼쪽에 이미 보여준다. 여기에는 **왜 그 값인지**만 적는다 —
+# 앞에 숫자를 또 쓰면 한 행에 같은 수가 두 번 나온다.
 BASELINE_DISPLAY = [
-    ("W_FREQ", "공급지수 운행빈도 가중", "0.78 — 팀 설계값. 바꾸려면 새 기준선 발행(재계산+재검증) 필요."),
-    ("W_COV", "공급지수 접근성 가중", "0.22 — W_FREQ 와 합이 1."),
-    ("DAMP_EXP", "빈 땅 MI 감쇠 지수", "0.65 — 인구<50 임야 183칸의 가짜 사각지대 제거 실측 근거."),
-    ("MI_CLAMP", "MI 절대값 상한", "±2.6 — 극단값의 색 스케일 붕괴 방지."),
-    ("ELD", "우선순위 고령 가중", "1.6 — 회귀 학습값이 아니라 정책 결정값. 근거는 README §4."),
-    ("COVM", "커버리지 임계(m)", "600 — 최근접 정류장 거리 중앙값 392m 실측에서 결정."),
-    ("WALK", "승하차 안분 반경(m)", "800 — 03_join 설계와 결합. 변경 금지."),
-    ("MIN_FREQ_PER_H", "적정 판정 하한(회/h)", "2.0 — model.minFreqPerHour 와 동일 값(사본)."),
-    ("HEADWAY_MULT", "(현재 적용) 증편 배수", "sim.headwayMult 오버라이드가 실제로 주입된 값."),
+    ("W_FREQ", "공급지수 운행빈도 가중", "팀 설계값. 바꾸려면 새 기준선 발행(재계산+재검증)이 필요합니다."),
+    ("W_COV", "공급지수 접근성 가중", "운행빈도 가중과 합이 1 입니다."),
+    ("DAMP_EXP", "빈 땅 MI 감쇠 지수", "인구 50명 미만 임야 183칸의 가짜 사각지대를 걷어낸 실측 근거."),
+    ("MI_CLAMP", "MI 절대값 상한", "극단값이 색 스케일을 무너뜨리지 않게 자릅니다."),
+    ("ELD", "우선순위 고령 가중", "회귀 학습값이 아니라 정책 결정값입니다. 근거는 README §4."),
+    ("COVM", "커버리지 임계(m)", "최근접 정류장 거리 중앙값 392m 실측에서 결정했습니다."),
+    ("WALK", "승하차 안분 반경(m)", "03_join 설계와 맞물려 있어 바꾸지 않습니다."),
+    ("MIN_FREQ_PER_H", "적정 판정 하한(회/h)", "위 '모델 상수' 의 적정 판정 절대 하한과 같은 값입니다."),
+    ("HEADWAY_MULT", "(현재 적용) 증편 배수", "배차 영향력의 증편 배수가 실제로 주입된 값입니다."),
 ]
 
 
@@ -600,7 +616,7 @@ def _param_rows() -> list:
     rows = []
     for key, s in SPECS.items():
         ov = raw.get(key)
-        editable = s["scope"] in ("runtime", "pipeline")
+        editable = s["scope"] in ("runtime", "pipeline") and not s.get("locked")
         eff = effective(key)
         pending = False
         if s["scope"] == "pipeline":
@@ -661,6 +677,11 @@ def save_params(req: SaveRequest, _w=Depends(require_write)):
     unknown = [k for k in req.changes if k not in SPECS]
     if unknown:
         raise HTTPException(400, f"changes 에 알 수 없는 키가 있습니다: {unknown}")
+    # 화면에서 감추는 것만으로는 부족하다 — API 는 그대로 열려 있다.
+    locked = [k for k in req.changes if SPECS[k].get("locked")]
+    if locked:
+        raise HTTPException(400, f"읽기 전용 항목이라 저장할 수 없습니다: {locked} — "
+                                 "격자 산출물에 구워지는 값이라 파이프라인을 다시 돌려야 바뀝니다.")
     # pipeline 계급은 저장 가능하되 산출물 재계산([지표 재계산]) 전에는 화면에
     # 반영되지 않는다 — 응답 requiresRefresh 로 알린다. baseline 계급은 SPECS 에
     # 없어 아래 unknown 검사에서 자동 거부된다.
