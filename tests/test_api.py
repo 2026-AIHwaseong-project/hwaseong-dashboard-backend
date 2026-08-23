@@ -485,22 +485,69 @@ def ai_draft(monkeypatch):
 
 
 def test_draft_sections_forced_to_requested_keys(c, ai_draft):
-    """요청한 key 만 남고, 없는 key 는 버려야 한다."""
+    """요청한 key 만 남고, 없는 key 는 버리고, **빠진 장은 채워야 한다.**
+
+    예전에는 `keys == ["summary", "plan"]` 을 단언했다 — 6장을 요청했는데 2장만
+    돌아온 상태를 정상으로 고정한 셈이다. 그러면 heading 이 1~2 로 매끈하게
+    다시 매겨져 네 장이 없다는 흔적이 사라지고, 화면상 멀쩡해 보이는 채로
+    결재 문서까지 내려간다. 계약은 "요청한 장 수만큼 나온다" 여야 한다.
+    """
     ai_draft(BROKEN_DRAFT)
     d = c.post("/api/v1/reports/draft",
                json={"period": "am", "provider": "claude", "sections": SIX}).json()
     keys = [s["key"] for s in d["sections"]]
     assert "made_up" not in keys, f"요청에 없는 key 가 살아남음: {keys}"
-    assert keys == ["summary", "plan"], keys
+    assert keys == SIX, f"요청한 6장이 다 나오지 않음: {keys}"
+    assert d.get("missingSections") == ["status", "problem", "effect", "next"], \
+        f"빠진 장이 기록되지 않음: {d.get('missingSections')}"
+    filled = {s["key"]: s.get("body", "") for s in d["sections"]}
+    assert "작성하지 못했습니다" in filled["status"], "빈 장이 눈에 안 보인다"
+    assert filled["summary"] == "수요가 많다.", "모델이 낸 내용이 덮였다"
+
+
+def test_chat_draft_is_validated(c, monkeypatch):
+    """채팅으로 고친 초안도 계약을 거쳐야 한다 — 예전에는 개수만 셌다.
+
+    섹션 수가 같기만 하면 heading 이 없어도, key 를 지어내도 그대로 나갔다.
+    """
+    base = {"title": "보고서", "sections": [
+        {"key": k, "heading": f"{i}. x", "body": "b"} for i, k in enumerate(SIX, 1)]}
+    # 개수는 6 그대로지만 heading 을 지우고 key 하나를 지어냈다
+    edited = {"title": "보고서", "sections": (
+        [{"key": k, "body": "고침"} for k in SIX[:5]] + [{"key": "made_up", "body": "지어냄"}])}
+    import server.main as m
+    monkeypatch.setattr(m, "_extract_json",
+                        lambda t: {"reply": "고쳤습니다", "draft": edited})
+    res = m._chat_result("{}", "claude", "claude-opus-5", "report", base)
+    assert "draftRejected" not in res, "개수가 같은데 거부됐다"
+    secs = res["draft"]["sections"]
+    assert [s["key"] for s in secs] == SIX, [s["key"] for s in secs]
+    assert secs[0]["heading"] == "1. 검토 개요", secs[0]["heading"]
+    assert res["draft"].get("missingSections") == ["next"], res["draft"].get("missingSections")
 
 
 def test_draft_headings_are_numbered(c, ai_draft):
-    """heading 번호는 서버가 매긴다 — 모델이 빼먹어도 한글 문서에 번호가 붙는다."""
+    """heading 번호는 서버가 매긴다 — 모델이 빼먹어도 한글 문서에 번호가 붙는다.
+
+    번호는 **요청한 장 순서** 그대로 1부터 끊기지 않는다. 모델이 낸 장만 세면
+    빠진 자리가 번호에서도 지워져 문서가 멀쩡해 보인다(위 테스트 참고).
+    """
     ai_draft(BROKEN_DRAFT)
     d = c.post("/api/v1/reports/draft",
                json={"period": "am", "provider": "claude", "sections": SIX}).json()
     headings = [s["heading"] for s in d["sections"]]
-    assert headings == ["1. 검토 개요", "2. 개선 방안"], headings
+    assert headings == [f"{i}. {n}" for i, n in enumerate(
+        ["검토 개요", "현황 분석", "도출된 문제점", "개선 방안", "기대 효과", "향후 조치 계획"], 1)], headings
+
+
+def test_draft_partial_sections_still_complete(c, ai_draft):
+    """일부만 요청하면 그만큼만, 번호는 다시 1부터."""
+    ai_draft(BROKEN_DRAFT)
+    d = c.post("/api/v1/reports/draft",
+               json={"period": "am", "provider": "claude", "sections": ["plan", "summary"]}).json()
+    assert [s["key"] for s in d["sections"]] == ["plan", "summary"]
+    assert [s["heading"] for s in d["sections"]] == ["1. 개선 방안", "2. 검토 개요"]
+    assert "missingSections" not in d, "다 있는데 빠졌다고 표시됐다"
 
 
 def test_draft_table_title_truncated(c, ai_draft):

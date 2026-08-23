@@ -4,7 +4,7 @@
 pip install -r requirements.txt
 pip install pytest httpx playwright && playwright install chromium
 
-python -m pytest tests/ -q -m "not slow"      # 152개 (E2E 포함, 약 110초)
+python -m pytest tests/ -q -m "not slow"      # 166개 (E2E 포함, 약 110초)
 python -m pytest tests/test_pipeline.py -q    # ① 파이프라인 단위 (0.4초)
 python -m pytest tests/test_api.py -q         # ② API 통합 (14초)
 python -m pytest tests/test_e2e.py -q -m e2e  # ③ 브라우저 E2E (98초)
@@ -15,8 +15,8 @@ python -m pytest tests/ -q -m slow            # 산출물 재현성 (04_model �
 
 | 계층 | 파일 | 개수 | 무엇을 지키나 |
 |---|---|---:|---|
-| ① 파이프라인 단위 | `test_pipeline.py` | 47 | 수식·컷·격자 공간조인·norm_stats 계약 |
-| ② API 통합 | `test_api.py` | 88 | 10개 엔드포인트 계약·불변식·입력검증·응답시간 |
+| ① 파이프라인 단위 | `test_pipeline.py` | 50 | 수식·컷·격자 공간조인·norm_stats 계약·산출물 교체 목록 |
+| ② API 통합 | `test_api.py` | 99 | 10개 엔드포인트 계약·불변식·입력검증·응답시간·관리자 |
 | ③ 브라우저 E2E | `test_e2e.py` | 18 | 실제로 그려지고 클릭이 먹는가 |
 
 `07_validate.py` 와의 차이 — 그쪽은 실데이터 전체로 **회귀 성능을 재는** 검증기이고,
@@ -40,19 +40,25 @@ python -m pytest tests/ -q -m slow            # 산출물 재현성 (04_model �
 외부 CDN(카카오맵 SDK·Pretendard)은 오프라인 CI 에서 실패하지만 SVG 지도는 정상
 렌더링된다. 그래서 테스트는 **같은 원점 요청 실패와 자체 JS 예외만** 잡는다.
 
-## 현재 실패하는 9개
+## 실패를 결함 목록으로 쓰는 방식
 
-전부 `test_api.py` 의 D(입력검증)·E(의미 일관성) 구간이다. 실패가 곧 미해결 결함
-목록이므로 **지우지 말고 고쳐서 통과시킬 것.**
+이 스위트는 **테스트를 먼저 쓰고 그 실패 목록을 결함 목록으로 삼아** 만들어졌다.
+도입 시점에 9건이 빨간불이었고 — `limit=-1` 이 슬라이스로 새던 것, 배치 배열에
+상한이 없던 것, 음수 예산 수용, 예산 초과 표시 누락, 임의 모델 문자열이 SDK 로
+그대로 가던 것, context 프롬프트 무제한 증폭, '해소 통행량'이 한 응답에서 세 값,
+증편이 표현 방식에 따라 다른 결과, 문서와 API 의 정류장 수 불일치 — **지금은
+전부 통과한다.** 앞의 6건은 `aa114f88` 이, 뒤의 3건은 `f192b3e` 가 고쳤다.
 
-| 테스트 | 결함 |
-|---|---|
-| `test_priorities_negative_limit_rejected` | `limit=-1` 이 슬라이스로 새어 101건 반환 |
-| `test_simulation_placement_list_capped` | placements 배열 길이 상한 없음 |
-| `test_simulation_rejects_negative_budget` | 음수 예산 수용 |
-| `test_simulation_flags_over_budget` | 예산 1억에 36억 배치해도 초과 표시 없음 |
-| `test_report_model_allowlist` | 임의 모델 문자열이 SDK 로 그대로 전달 |
-| `test_report_context_size_capped` | context 가 프롬프트에 무제한 증폭 (1MB 확인) |
-| `test_resolved_trips_one_meaning` | 같은 응답 안에서 '해소 통행량'이 3가지 값 |
-| `test_freq_placement_is_associative` | `count:2` 와 `1건+1건` 의 결과가 18.8% 다름 |
-| `test_documented_stop_count_matches_api` | 문서 3,158개 vs API 2,866개 |
+이 방식은 계속 쓴다. 새 결함을 찾으면 **고치기 전에 테스트부터 빨간불로 만들고**,
+고친 뒤 초록불이 되는지 확인한다. 통과하는 테스트는 아무것도 증명하지 않는다 —
+결함을 넣었을 때 실패해야 그물이다.
+
+### 지금 알려진 한계
+
+- 이 컨테이너에서는 `test_recommendation_under_500ms` 12건이 700~900ms 로 실패한다.
+  러너 성능 문제이고 CI(GitHub Actions)에서는 통과한다.
+- `test_pipeline.py` 의 수식 테스트 일부는 `04_model.py` 의 함수를 부르지 않고
+  수식을 테스트 파일 안에 다시 적어 둔다. 실제로 검증되는 것은 `params.py` 의
+  상수값이라, 모델 수식 자체를 고치면 이 계층이 못 잡는다.
+- `-m slow` 재현성 테스트는 `grid_metrics.csv` 만 되돌린다. 돌린 뒤
+  `git status` 에 `norm_stats.json` 이 남으면 되돌리고 커밋할 것.

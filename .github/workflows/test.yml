@@ -1,18 +1,11 @@
 name: Test
 
-# 배포(deploy.yml)는 이 워크플로가 통과한 뒤에만 돌게 하는 것이 목적입니다.
-# deploy.yml 에 다음을 추가하세요:
+# 배포(deploy.yml)는 이 워크플로가 통과한 뒤에만 돕니다 — workflow_run 으로 연결돼
+# 있고, 실패하면 EC2 로 나가지 않습니다. 급할 때는 Actions 탭에서 Deploy 를 손으로
+# 돌려 우회할 수 있습니다(workflow_dispatch).
 #
-#   on:
-#     workflow_run:
-#       workflows: ["Test"]
-#       branches: [main]
-#       types: [completed]
-#   jobs:
-#     deploy:
-#       if: github.event.workflow_run.conclusion == 'success'
-#
-# 지금은 push 마다 테스트 없이 EC2 로 나가므로, 계약이 깨져도 그대로 배포됩니다.
+# 이 워크플로의 이름("Test")은 deploy.yml 이 문자열로 참조합니다 — 바꾸면 게이트가
+# 조용히 풀립니다(트리거가 매칭되지 않아 배포가 아예 안 돌게 됩니다).
 
 on:
   push:

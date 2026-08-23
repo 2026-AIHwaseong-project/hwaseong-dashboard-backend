@@ -1253,11 +1253,21 @@ def _validate_draft(draft: dict, req_sections: list) -> dict:
     if isinstance(sections, list):
         got = {sec.get("key"): sec for sec in sections
                if isinstance(sec, dict) and sec.get("key") in REPORT_SECTION_NAMES}
-        kept = [k for k in req_sections if k in got]
+        # 요청한 장은 **빠짐없이** 채운다. 거르기만 하면 모델이 6장 중 5장만 냈을 때
+        # heading 이 1~5 로 매끈하게 다시 매겨져 **한 장이 없다는 흔적조차 사라진다.**
+        # 화면상 아무 이상이 없어 보이는 채로 결재 문서까지 내려간다 — 여기서 가장
+        # 조용히 틀리는 경로였다. 빠진 자리는 눈에 보이는 문구로 남겨 둔다.
+        want = [k for k in req_sections if k in REPORT_SECTION_NAMES]
+        missing = [k for k in want if k not in got]
         draft["sections"] = [
             {**got[k], "key": k, "heading": f"{i}. {REPORT_SECTION_NAMES[k]}"}
-            for i, k in enumerate(kept, 1)
+            if k in got else
+            {"key": k, "heading": f"{i}. {REPORT_SECTION_NAMES[k]}",
+             "body": "(AI가 이 항목을 작성하지 못했습니다. 담당자가 직접 채워 주세요.)"}
+            for i, k in enumerate(want, 1)
         ]
+        if missing:
+            draft["missingSections"] = missing
 
     tables = draft.get("tables")
     if isinstance(tables, list):
@@ -2092,7 +2102,15 @@ def _chat_result(text: str, provider: str, model: str, mode: str,
         if shrank:
             res["draftRejected"] = "sections_shrank"
         else:
-            res["draft"] = out["draft"]
+            # 이 경로에도 같은 계약을 건다. 여기가 비어 있어서 채팅으로 고친 초안은
+            # heading 정본화도, 계약 밖 key 제거도, 표 정규화도 거치지 않았다 —
+            # 섹션 **개수**만 같으면 heading 이 없어도, key 를 지어내도 그대로 나갔다.
+            # 계약은 지금 초안의 장 구성이다(프론트가 항상 현재 초안을 함께 보낸다).
+            if isinstance(base_secs, list):
+                want = [s.get("key") for s in base_secs if isinstance(s, dict)]
+                res["draft"] = _validate_draft(out["draft"], want)
+            else:
+                res["draft"] = out["draft"]
     return res
 
 

@@ -1,12 +1,27 @@
 name: Deploy to EC2
 
+# 테스트가 통과한 뒤에만 배포한다.
+#
+# 이전에는 test.yml 과 이 파일이 둘 다 `on: push: branches:[main]` 이라 **독립 병렬로**
+# 돌았다. 이름은 "배포 앞단 테스트 게이트"였지만 실제로는 아무것도 막지 못했고,
+# 같은 커밋(64aa2bf)에서 배포가 테스트보다 2분 16초 먼저 success 로 끝난 기록이
+# 남아 있다 — 계약이 깨진 코드가 그대로 심사용 주소로 나갔다는 뜻이다.
 on:
-  push:
+  workflow_run:
+    workflows: ["Test"]
+    types: [completed]
     branches: [main]
+  # 게이트를 우회해야 할 때를 남겨 둔다 — 러너가 느려 응답시간 테스트만 흔들리는데
+  # 배포는 급한 상황이 실제로 있다. Actions 탭에서 손으로 돌린다.
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # workflow_dispatch 는 사람이 판단해 돌린 것이므로 그대로 통과시킨다.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     steps:
       - name: SSH and redeploy
         uses: appleboy/ssh-action@v1
@@ -18,3 +33,19 @@ jobs:
             cd /home/ubuntu/hw/hwaseong-dashboard-backend
             git pull
             docker compose up -d --build
+
+      # `docker compose up -d` 는 컨테이너가 **뜨자마자** 돌아온다. 앱은 시뮬 엔진
+      # import 에 15~20초를 더 쓰고, 기준선 assert 에 걸리면 그 뒤에 죽는다.
+      # 확인이 없으면 서버가 크래시 루프에 빠져도 이 잡은 초록불로 끝난다.
+      - name: 배포 확인 — API 가 실제로 응답하는가
+        run: |
+          for i in $(seq 1 15); do
+            if curl -fsS -o /dev/null --max-time 10 https://15-165-83-80.sslip.io/api/v1/meta; then
+              echo "배포 확인 완료 (${i}회차)"
+              exit 0
+            fi
+            echo "대기 중… (${i}/15)"
+            sleep 10
+          done
+          echo "::error::배포 후 150초 동안 /api/v1/meta 가 응답하지 않았습니다. 컨테이너가 기동에 실패했을 수 있습니다 — docker compose logs api 를 확인하세요."
+          exit 1

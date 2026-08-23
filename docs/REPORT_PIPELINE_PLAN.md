@@ -147,11 +147,20 @@ if (d.sections.length < currentDraft.sections.length) return;
 AI 호출부(`_acall_ai`)를 대역으로 바꿔 규격 위반 응답을 실제로 넣어 확인한다.
 
 - [x] `sections` 가 정확히 6개이고 heading 이 1~6 번호로 시작한다
+      — 처음 이 항목에 [x] 를 칠 때는 사실이 아니었다. `_validate_draft` 는 요청한
+      key 로 **거르기만** 했으므로 모델이 5장만 내면 응답도 5장이었고, heading 이
+      1~5 로 매끈하게 다시 매겨져 한 장이 빠졌다는 흔적조차 남지 않았다.
+      지금은 빠진 장을 눈에 보이는 문구로 채우고 `missingSections` 에 기록한다.
 - [x] `tables[].rows` 의 각 행 길이가 `columns` 길이와 같다
 - [x] `tables[].title` 이 31자 이내다
-- [x] 같은 초안으로 만든 RTF 와 XLSX 의 표 셀 수가 같다
+- [~] 같은 초안으로 만든 RTF 와 XLSX 의 표 셀 수가 같다
+      — 동작은 맞다(서버가 행 길이를 `columns` 에 맞추므로 두 출력이 구조적으로
+      같아진다. 프론트 `rtfTable`·`draftToSheets` 를 떼어내 확인함). 다만 **그것을
+      지키는 테스트는 없다.** 생성기가 프론트 저장소에 있어 이 스위트에서 닿지 않는다.
 - [x] 잘린 JSON 을 넣으면 빈 문서가 아니라 폴백 초안이 나온다
 - [x] 채팅이 섹션을 줄여 돌려주면 반영되지 않는다
+- [x] 채팅으로 고친 초안도 `_validate_draft` 를 거친다 — 개수만 세던 때는 heading 을
+      지우거나 key 를 지어내도 그대로 나갔다
 
 ## 7. 프론트에 영향이 가는 지점
 

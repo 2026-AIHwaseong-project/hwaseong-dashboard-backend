@@ -239,7 +239,7 @@ REST 외에 정적 마운트가 둘 있습니다.
 | 파라미터 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `period` | string | `am` | 시간대 코드 |
-| `limit` | integer | `10` | 반환 최대 건수 |
+| `limit` | integer | `10` | 반환 최대 건수. **0~100** 밖이면 400 |
 
 ### 응답
 
@@ -404,8 +404,8 @@ REST 외에 정적 마운트가 둘 있습니다.
 |---|---|---|---|
 | `name` | string | `"시나리오"` | 시나리오 이름 |
 | `period` | string | `"am"` | 현재 표시 시간대 (유효성 검증용) |
-| `budgetKrw` | integer | `3000000000` | 예산 (원) |
-| `placements` | array | `[]` | 배치 목록 |
+| `budgetKrw` | integer | `3000000000` | 예산 (원). **음수면 400** |
+| `placements` | array | `[]` | 배치 목록. **100건을 넘으면 400** (`MAX_PLACEMENTS=100`) |
 
 #### `placements` 항목
 
@@ -453,6 +453,7 @@ REST 외에 정적 마운트가 둘 있습니다.
     ]
   },
   "budgetKrw": 3000000000,
+  "overBudget": false,
   "periods": [
     {
       "period": "am", "periodName": "출근",
@@ -487,6 +488,8 @@ REST 외에 정적 마운트가 둘 있습니다.
 
 - `resolvedTripsPerDay`: Poisson 회귀 기반 ΔB̂ (예측 승차 증가량) — **4개 시간대 합산**입니다.
   `periods[].delta` 는 시간대별이고 이 값은 전 시간대 합이라 서로 직접 비교되지 않습니다.
+- `overBudget`(최상위): `cost.totalKrw` 가 요청한 `budgetKrw` 를 넘었는가.
+  **`budgetKrw` 를 0 이나 생략으로 보내면 예산 제약이 없다는 뜻이라 항상 `false`** 입니다.
 - `krwPerTripPerDay`: `totalKrw ÷ resolvedTripsPerDay`. **ΔB̂ ≤ 0 이면 숫자가 아니라 `null`**
   입니다 — 그대로 포맷하면 화면이 깨지므로 널 처리를 두세요.
 - `resolvedNeedCells` 도 4개 시간대 합산입니다(같은 격자가 여러 시간대에서 풀리면 중복 계수).
@@ -727,7 +730,7 @@ REST 외에 정적 마운트가 둘 있습니다.
 | `isAiGenerated` | `false` |
 | `provider` | `"규칙 기반 초안 (AI 미사용)"` |
 | `model` | `null` |
-| `sections` | 요청한 6개가 아니라 `summary`·`priority` **2개만** |
+| `sections` | 요청한 key 그대로 **전부**. 모델이 낸 장이 모자라면 서버가 채우고 `missingSections` 에 어느 장을 채웠는지 싣습니다 |
 
 프론트는 `isAiGenerated` 로 분기하세요. 오류 코드로는 구분되지 않습니다.
 
