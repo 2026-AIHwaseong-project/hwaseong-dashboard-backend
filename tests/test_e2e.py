@@ -221,12 +221,22 @@ def test_recommendation_button_fills_placements(page):
 # ══════════════════════════════════════════════════════════════
 # 4. 보고서 — 파일이 실제로 내려받아지는가
 # ══════════════════════════════════════════════════════════════
+# 보고서 모달은 **기록 목록**을 먼저 연다. 예전에는 [AI 보고서]를 누르면 곧바로
+# 생성이 나갔지만, 지금은 목록 안의 [AI 보고서 생성]을 눌러야 요청이 나간다.
+# 두 단계를 한곳에 모아 둔다 — 흐름이 또 바뀌면 여기만 고치면 된다.
+def _open_report_draft(page):
+    page.locator("[data-report-open]:visible").first.click()
+    gen = page.locator("[data-gen-new]")
+    expect(gen).to_be_visible(timeout=10_000)
+    gen.click()
+    page.wait_for_timeout(8000)
+
+
 @pytest.mark.parametrize("label,ext", [("한글 문서", ".rtf"), ("엑셀 파일", ".xlsx")])
 def test_report_download(page, label, ext):
     """AI 키가 없어도 규칙 기반 초안으로 내려와야 한다 (마지막 방어선)."""
     _open(page, "simulation.html")
-    page.locator("[data-report-open]:visible").first.click()
-    page.wait_for_timeout(8000)
+    _open_report_draft(page)
 
     btn = page.get_by_role("button", name=re.compile(label))
     expect(btn.first).to_be_visible(timeout=15_000)
@@ -243,10 +253,22 @@ def test_report_download(page, label, ext):
 def test_report_has_six_sections(page):
     """섹션 6개·번호 1~6 은 한글 문서로 그대로 나가는 계약이다."""
     _open(page, "simulation.html")
-    page.locator("[data-report-open]:visible").first.click()
-    page.wait_for_timeout(8000)
+    _open_report_draft(page)
     body = page.locator("body").inner_text()
     assert "검토 개요" in body, "보고서 초안이 렌더링되지 않았다"
+
+
+def test_report_opens_to_list_not_generation(page):
+    """[AI 보고서]는 **목록**을 연다 — 누르는 순간 AI 호출이 나가지 않는다."""
+    _open(page, "simulation.html")
+    calls = []
+    page.on("request", lambda r: calls.append(r.url) if "/reports/draft" in r.url else None)
+    page.locator("[data-report-open]:visible").first.click()
+    expect(page.locator("[data-gen-new]")).to_be_visible(timeout=10_000)
+    page.wait_for_timeout(2000)
+    assert not calls, f"열기만 했는데 생성 요청이 나갔다: {calls}"
+    body = page.locator("body").inner_text()
+    assert "아직 만든 보고서가 없습니다" in body or "AI 보고서 생성" in body, body[:300]
 
 
 # ══════════════════════════════════════════════════════════════
