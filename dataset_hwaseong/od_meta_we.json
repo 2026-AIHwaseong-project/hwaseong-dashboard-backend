@@ -1,21 +1,21 @@
 {
  "date": "20260530",
- "top_n": 10,
- "pairs": 100,
- "pairs_resolved": 100,
- "pairs_remaining": 0,
- "pairs_with_data": 88,
- "pairs_empty": 12,
- "pairs_error_this_run": 0,
- "rows": 3077,
- "total_trips": 20460,
- "stop_coverage": 0.237,
+ "top_n": 25,
+ "pairs": 625,
+ "pairs_resolved": 555,
+ "pairs_remaining": 70,
+ "pairs_with_data": 419,
+ "pairs_empty": 136,
+ "pairs_error_this_run": 81,
+ "rows": 11443,
+ "total_trips": 51039,
+ "stop_coverage": 0.434,
  "sgg_used": [
   "41591",
   "41593",
   "41595",
   "41597"
  ],
- "caveat": "상위 10개 동 전조합만 받았다. 화성시 전체 통행량이 아니다. 전수는 188x188=35,344 쌍이라 하루 10,000회 제한을 넘는다.",
- "built": "2026-08-23 05:27"
+ "caveat": "상위 25개 동 전조합만 받았다. 화성시 전체 통행량이 아니다. 전수는 188x188=35,344 쌍이라 하루 10,000회 제한을 넘는다.",
+ "built": "2026-08-25 04:25"
 }
