@@ -50,7 +50,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1140,6 +1142,63 @@ class UploadRequest(BaseModel):
     contentB64: str
     reason: str = ""
     actor: str = "admin"
+
+
+TEMPLATE_SAMPLE_ROWS = 3
+
+
+@router.get("/upload/template")
+def upload_template(datasetId: str = Query(..., description="DATASETS 의 키")):
+    """예시 형식 CSV — 헤더 한 줄 + 라이브 파일 앞 3행.
+
+    **헤더 정본을 서버가 준다.** 프론트가 컬럼 이름을 따로 들고 있으면 두 값이
+    갈리는데, 그때 나는 증상이 하필 "예시대로 만들었는데 400 컬럼이 다릅니다"라
+    사용자가 원인을 찾을 방법이 없다. 이 저장소가 반복해 겪은 '같은 개념이 두 값을
+    갖는' 사고를 여기서는 애초에 안 만든다.
+
+    **BOM(utf-8-sig)을 붙인다.** 이 파일의 가장 흔한 사용 경로가 "내려받아 엑셀로
+    열고 고쳐서 다시 올리기"인데, BOM 이 없으면 엑셀이 cp949 로 열어 한글이 깨진
+    채로 편집된다. _decode_upload 가 접수 시점에 cp949 를 받아 주기는 하지만,
+    깨진 글자를 되살려 주지는 못한다 — 깨지지 않게 하는 편이 낫다.
+
+    표본 3행을 싣는 이유: 실제로 반려를 만드는 것은 컬럼 이름보다 **값의 생김새**
+    (날짜가 20251201 인지 2025-12-01 인지, 코드에 접두어가 붙는지)다. 다만 라이브
+    파일의 헤더가 계약과 다르면 표본을 싣지 않는다 — 틀린 예시를 주느니 없는 게 낫다.
+    """
+    if not upload_enabled():
+        raise HTTPException(404, "업로드가 켜져 있지 않습니다.")
+    spec = DATASETS.get(datasetId)
+    if spec is None:
+        raise HTTPException(400, f"올릴 수 없는 대상입니다 (허용: {', '.join(DATASETS)})")
+
+    buf = io.StringIO(newline="")
+    w = csv.writer(buf, lineterminator="\r\n")   # 엑셀이 기대하는 줄바꿈
+    w.writerow(spec["header"])
+
+    src = ROOT / "dataset_hwaseong" / spec["name"]
+    try:
+        # 승하차 원본은 30만 행·19MB 다. 앞 몇 줄만 읽고 빠져나온다.
+        with open(src, encoding="utf-8-sig", newline="") as fh:
+            rd = csv.reader(fh)
+            head = next(rd, None)
+            if head and [c.strip() for c in head] == spec["header"]:
+                for i, row in enumerate(rd):
+                    if i >= TEMPLATE_SAMPLE_ROWS:
+                        break
+                    w.writerow(row)
+    except OSError:
+        pass    # 표본 없이 헤더만 — 그래도 계약은 전달된다
+
+    fname = spec["name"][:-4] if spec["name"].endswith(".csv") else spec["name"]
+    fname += "_예시양식.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        # 한글 파일명은 RFC 5987 로만 안전하게 나간다. filename= 은 옛 클라이언트용 폴백.
+        headers={"Content-Disposition":
+                 "attachment; filename=upload_template.csv; "
+                 "filename*=UTF-8''" + quote(fname)},
+    )
 
 
 @router.post("/upload")
