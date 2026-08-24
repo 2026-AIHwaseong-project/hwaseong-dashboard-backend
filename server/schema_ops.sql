@@ -73,6 +73,9 @@ CREATE INDEX IF NOT EXISTS batch_grid_geom_ix ON batch_grid USING GIST (geom);
 CREATE TABLE IF NOT EXISTS batch_grid_metrics (
   grid_id            TEXT NOT NULL REFERENCES batch_grid(grid_id) ON DELETE CASCADE,
   period             TEXT NOT NULL CHECK (period IN ('am','day','pm','night')),
+  -- 평일/주말. 화면의 요일 토글이 이 축입니다. 05_load.py 가 grid_{period}.json 과
+  -- grid_{period}_we.json 두 벌을 굽고, 계약도 daytype 파라미터를 받습니다.
+  daytype            TEXT NOT NULL DEFAULT 'wd' CHECK (daytype IN ('wd','we')),
   demand             INTEGER,            -- D×100 (정수). 화면 표기 단위 그대로
   supply             INTEGER,            -- S×100
   z_demand           DOUBLE PRECISION,
@@ -88,9 +91,10 @@ CREATE TABLE IF NOT EXISTS batch_grid_metrics (
   -- 없습니다 — 질의 대상이 아니고 항상 통째로 나갑니다.
   bins               JSON NOT NULL,
   batch_run_id       BIGINT REFERENCES batch_run(id),
-  PRIMARY KEY (grid_id, period)
+  PRIMARY KEY (grid_id, period, daytype)
 );
-CREATE INDEX IF NOT EXISTS batch_grid_metrics_period_ix ON batch_grid_metrics (period);
+-- (period, daytype) 인덱스는 아래 "구버전 DB 따라잡기" 뒤에서 만듭니다 —
+--  구버전에는 daytype 컬럼이 아직 없어 여기서 만들면 실패합니다.
 
 -- 시간대별 상수 — MI 색 경계. 모델이 정한 값이라 격자에서 파생되지 않습니다.
 --
@@ -99,9 +103,11 @@ CREATE INDEX IF NOT EXISTS batch_grid_metrics_period_ix ON batch_grid_metrics (p
 --    붉은 칸이 하나 늘고 상단 KPI 는 그대로인 화면이 나옵니다(실제로 그렇게 나왔고
 --    그래서 뺐습니다). server/db.py 의 _kpi 가 합쳐진 값에서 셉니다.
 CREATE TABLE IF NOT EXISTS batch_grid_period (
-  period         TEXT PRIMARY KEY CHECK (period IN ('am','day','pm','night')),
+  period         TEXT NOT NULL CHECK (period IN ('am','day','pm','night')),
+  daytype        TEXT NOT NULL DEFAULT 'wd' CHECK (daytype IN ('wd','we')),
   mi_thresholds  JSON NOT NULL,
-  batch_run_id   BIGINT REFERENCES batch_run(id)
+  batch_run_id   BIGINT REFERENCES batch_run(id),
+  PRIMARY KEY (period, daytype)
 );
 
 -- meta.json — 지역·격자 제원·수식 계수·단가·데이터 품질 표기 등 설정 문서입니다.
@@ -138,6 +144,11 @@ CREATE TABLE IF NOT EXISTS batch_route (
   -- path 는 [[lon,lat],…] 원본을 그대로 둡니다. geom 은 그것으로 만든 조회용 사본이라,
   -- 프론트로 나가는 좌표는 항상 path 에서 나옵니다(왕복 변환으로 값이 흔들리지 않게).
   path         JSON NOT NULL,
+  -- 운행정보(기점·종점·첫차·막차·배차간격·회사·회차점). 노선 상세 화면이 통째로
+  -- 쓰고 질의 대상이 아니라 한 칸에 둡니다 — batch_meta·batch_stop_profile 과 같은
+  -- 판단입니다. 개별 컬럼으로 풀면 09_augment_routes 가 필드를 늘릴 때마다
+  -- 스키마·적재기·리더 세 곳을 함께 고쳐야 하고, 하나만 빠지면 조용히 사라집니다.
+  ops          JSON,
   geom         GEOMETRY(LineString, 4326),
   batch_run_id BIGINT REFERENCES batch_run(id)
 );
@@ -171,6 +182,7 @@ CREATE TABLE IF NOT EXISTS admin_grid_override (
   id         BIGSERIAL PRIMARY KEY,
   grid_id    TEXT NOT NULL,
   period     TEXT CHECK (period IN ('am','day','pm','night')),  -- NULL = 전 시간대
+  daytype    TEXT CHECK (daytype IN ('wd','we')),                -- NULL = 평일·주말 모두
   field      TEXT NOT NULL CHECK (field IN
                ('mi','quadrant','priority_score','demand','supply','action')),
   value_num  DOUBLE PRECISION,
@@ -190,8 +202,7 @@ CREATE INDEX IF NOT EXISTS admin_grid_override_live_ix
   ON admin_grid_override (grid_id, period) WHERE revoked_at IS NULL;
 -- 같은 칸·같은 시간대·같은 필드에 살아 있는 override 는 하나뿐이어야 합니다.
 -- (없으면 아래 jsonb_object_agg 에서 어느 쪽이 이길지 정해지지 않습니다.)
-CREATE UNIQUE INDEX IF NOT EXISTS admin_grid_override_one_live_ix
-  ON admin_grid_override (grid_id, COALESCE(period, '*'), field) WHERE revoked_at IS NULL;
+-- (같은 이유로) 이 유니크 인덱스도 아래 따라잡기 뒤에서 만듭니다.
 
 -- 시뮬레이션 시나리오 (공유 URL 의 실체)
 CREATE TABLE IF NOT EXISTS scenario (
@@ -241,15 +252,66 @@ CREATE INDEX IF NOT EXISTS rt_bus_position_age_ix ON rt_bus_position (updated_at
 -- 필드마다 LEFT JOIN 을 하나씩 두는 방법도 있지만(예전 설계가 그랬습니다),
 -- 덮어쓸 수 있는 필드를 하나 늘릴 때마다 조인이 하나씩 붙습니다. 이렇게 모아 두면
 -- 아래 뷰에서 COALESCE 한 줄만 늘어나고 조인 수는 그대로 둘입니다.
+
+-- ── 구버전 DB 따라잡기 (멱등) ────────────────────────────────────────────────
+-- 이 파일은 06_load_db.py 가 **매번** 통째로 실행합니다. 그런데
+-- CREATE TABLE IF NOT EXISTS 는 이미 있는 테이블에 컬럼을 더해 주지 않습니다.
+-- 요일축(daytype)을 뒤늦게 넣었으므로, 이미 올라와 있는 DB 를 여기서 따라잡게
+-- 합니다. 새로 만든 DB 에서는 전부 no-op 입니다.
+DO $$
+BEGIN
+  ALTER TABLE batch_grid_metrics  ADD COLUMN IF NOT EXISTS daytype TEXT NOT NULL DEFAULT 'wd';
+  ALTER TABLE batch_grid_period   ADD COLUMN IF NOT EXISTS daytype TEXT NOT NULL DEFAULT 'wd';
+  ALTER TABLE admin_grid_override ADD COLUMN IF NOT EXISTS daytype TEXT;
+  -- 노선 운행정보도 스키마보다 나중에 들어왔습니다(09_augment_routes).
+  ALTER TABLE batch_route ADD COLUMN IF NOT EXISTS ops JSON;
+
+  -- 기본키에 daytype 이 빠져 있으면 다시 건다. 안 그러면 평일 행이 주말 행을
+  -- 덮어써서 8벌이 4벌로 줄어든다(조용히 절반이 사라지는 종류).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.key_column_usage
+    WHERE table_name = 'batch_grid_metrics'
+      AND constraint_name = 'batch_grid_metrics_pkey' AND column_name = 'daytype'
+  ) THEN
+    ALTER TABLE batch_grid_metrics DROP CONSTRAINT batch_grid_metrics_pkey;
+    ALTER TABLE batch_grid_metrics ADD PRIMARY KEY (grid_id, period, daytype);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.key_column_usage
+    WHERE table_name = 'batch_grid_period'
+      AND constraint_name = 'batch_grid_period_pkey' AND column_name = 'daytype'
+  ) THEN
+    ALTER TABLE batch_grid_period DROP CONSTRAINT batch_grid_period_pkey;
+    ALTER TABLE batch_grid_period ADD PRIMARY KEY (period, daytype);
+  END IF;
+END $$;
+
+-- 컬럼이 확보된 뒤에 만듭니다.
+CREATE INDEX IF NOT EXISTS batch_grid_metrics_period_ix
+  ON batch_grid_metrics (period, daytype);
+-- 같은 칸·시간대·요일·필드에 살아 있는 override 는 하나뿐이어야 합니다.
+CREATE UNIQUE INDEX IF NOT EXISTS admin_grid_override_one_live_ix
+  ON admin_grid_override (grid_id, COALESCE(period, '*'), COALESCE(daytype, '*'), field)
+  WHERE revoked_at IS NULL;
+
+-- 뷰는 매번 새로 만듭니다. CREATE OR REPLACE 는 **컬럼을 끝에만** 더할 수 있어,
+-- daytype 을 중간에 끼운 지금 형태로는 기존 DB 에서 실패합니다("cannot change
+-- name of view column"). 뷰에는 데이터가 없으므로 지우고 다시 만드는 편이 안전합니다.
+DROP VIEW IF EXISTS v_grid_cell;
+DROP VIEW IF EXISTS v_grid_metrics;
+DROP VIEW IF EXISTS v_grid_override;
+
 CREATE OR REPLACE VIEW v_grid_override AS
 SELECT grid_id,
        period,
+       daytype,
        jsonb_object_agg(field,
          CASE WHEN value_num IS NOT NULL THEN to_jsonb(value_num)
               ELSE to_jsonb(value_text) END) AS ov
 FROM admin_grid_override
 WHERE revoked_at IS NULL
-GROUP BY grid_id, period;
+GROUP BY grid_id, period, daytype;
 
 -- 시간대 지정 override 가 전 시간대(period IS NULL) override 를 이깁니다.
 -- 둘 다 없으면 배치 값이 그대로 나옵니다 — override 가 0건이면 이 뷰의 출력은
@@ -258,6 +320,7 @@ CREATE OR REPLACE VIEW v_grid_metrics AS
 SELECT
   m.grid_id,
   m.period,
+  m.daytype,
   COALESCE((sp.ov->>'demand')::int,          (gl.ov->>'demand')::int,          m.demand)         AS demand,
   COALESCE((sp.ov->>'supply')::int,          (gl.ov->>'supply')::int,          m.supply)         AS supply,
   m.z_demand,
@@ -272,14 +335,18 @@ SELECT
   m.bins,
   (sp.grid_id IS NOT NULL OR gl.grid_id IS NOT NULL)                                             AS is_overridden
 FROM batch_grid_metrics m
+-- 시간대 지정 override 가 전 시간대 override 를 이깁니다. daytype 은 NULL 이면
+-- 평일·주말 모두에 걸립니다(지정돼 있으면 그 요일에만).
 LEFT JOIN v_grid_override sp ON sp.grid_id = m.grid_id AND sp.period = m.period
-LEFT JOIN v_grid_override gl ON gl.grid_id = m.grid_id AND gl.period IS NULL;
+                            AND (sp.daytype IS NULL OR sp.daytype = m.daytype)
+LEFT JOIN v_grid_override gl ON gl.grid_id = m.grid_id AND gl.period IS NULL
+                            AND (gl.daytype IS NULL OR gl.daytype = m.daytype);
 
 -- 격자 속성 + 지표를 합친 것. server/db.py 가 이 한 방을 시간대별로 읽습니다.
 CREATE OR REPLACE VIEW v_grid_cell AS
 SELECT g.grid_id, g.ord, g.name, g.region, g.region_code, g.region_kind, g.lon, g.lat,
        g.elderly_ratio, g.nearest_stop_id,
-       v.period, v.demand, v.supply, v.z_demand, v.z_supply, v.mi, v.flow,
+       v.period, v.daytype, v.demand, v.supply, v.z_demand, v.z_supply, v.mi, v.flow,
        v.flow_trips_per_day, v.coverage, v.quadrant, v.action, v.priority_score,
        v.bins, v.is_overridden
 FROM batch_grid g

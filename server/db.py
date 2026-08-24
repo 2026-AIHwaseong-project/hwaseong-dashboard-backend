@@ -53,15 +53,15 @@ def _connect():
     return conn
 
 
-def _cells(cur, period, quad_label, action_label):
+def _cells(cur, period, quad_label, action_label, daytype="wd"):
     """격자 셀 목록. 키 순서는 05_load.py 가 쓰는 순서 그대로입니다 — 바꾸지 마세요."""
     cur.execute(
         "SELECT grid_id, name, region, region_code, region_kind, lon, lat,"
         " demand, supply, z_demand, z_supply, mi, flow, flow_trips_per_day,"
         " elderly_ratio, coverage, quadrant, action, priority_score,"
         " nearest_stop_id, bins"
-        " FROM v_grid_cell WHERE period = %s ORDER BY ord",
-        (period,),
+        " FROM v_grid_cell WHERE period = %s AND daytype = %s ORDER BY ord",
+        (period, daytype),
     )
     out = []
     for (gid, name, region, rcode, rkind, lon, lat, demand, supply, zd, zs, mi,
@@ -133,19 +133,28 @@ def load_all(quad_label: dict, action_label: dict):
             cur.execute("SELECT doc FROM batch_meta WHERE id = 1")
             data["meta"] = cur.fetchone()[0]
 
-            for p in PERIODS:
-                # _cells 가 같은 커서를 다시 쓰므로 여기서 먼저 꺼내 둡니다.
-                cur.execute(
-                    "SELECT mi_thresholds FROM batch_grid_period WHERE period = %s", (p,)
-                )
-                thresholds = cur.fetchone()[0]
-                cells = _cells(cur, p, quad_label, action_label)
-                data[f"grid_{p}"] = {
-                    "period": p,
-                    "scale": {"miThresholds": thresholds},
-                    "kpi": _kpi(cells),
-                    "cells": cells,
-                }
+            # 평일·주말 두 축. JSON 모드는 grid_am / grid_am_we 두 벌을 만들므로
+            # DB 모드도 같은 키를 내야 화면의 요일 토글이 양쪽에서 같게 동작합니다.
+            # 주말이 적재돼 있지 않으면 그 키를 만들지 않습니다 — 평일 값으로
+            # 채워 넣으면 토글이 "둘 다 같은 화면"이 되어 조용히 틀립니다.
+            for dt in ("wd", "we"):
+                for p in PERIODS:
+                    # _cells 가 같은 커서를 다시 쓰므로 여기서 먼저 꺼내 둡니다.
+                    cur.execute(
+                        "SELECT mi_thresholds FROM batch_grid_period"
+                        " WHERE period = %s AND daytype = %s", (p, dt)
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        continue
+                    cells = _cells(cur, p, quad_label, action_label, dt)
+                    key = f"grid_{p}" if dt == "wd" else f"grid_{p}_we"
+                    data[key] = {
+                        "period": p,
+                        "scale": {"miThresholds": row[0]},
+                        "kpi": _kpi(cells),
+                        "cells": cells,
+                    }
 
             cur.execute(
                 "SELECT stop_id, ars_no, name, dong, lon, lat, kind, routes,"
@@ -159,10 +168,14 @@ def load_all(quad_label: dict, action_label: dict):
             ]}
 
             cur.execute(
-                "SELECT route_id, name, type, stop_ids, path FROM batch_route ORDER BY ord"
+                "SELECT route_id, name, type, stop_ids, path, ops"
+                " FROM batch_route ORDER BY ord"
             )
+            # 키 순서가 05_load.py 와 같아야 합니다 — 계약 비교(06_verify_db.py)가
+            # 정렬 없이 바이트로 맞춰 보기 때문입니다. ops 는 그 뒤에 이어 붙습니다.
             data["routes"] = {"routes": [
-                {"id": r[0], "name": r[1], "type": r[2], "stopIds": r[3], "path": r[4]}
+                {"id": r[0], "name": r[1], "type": r[2], "stopIds": r[3], "path": r[4],
+                 **(r[5] or {})}
                 for r in cur.fetchall()
             ]}
 

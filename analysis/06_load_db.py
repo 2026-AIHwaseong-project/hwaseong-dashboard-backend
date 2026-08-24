@@ -120,15 +120,27 @@ def main() -> int:
     counts["meta"] = 1
 
     # ── 격자: 시간대 무관 속성 + 시간대별 지표 ───────────────────────────────
-    grids = {p: read(f"grid_{p}") for p in PERIODS}
+    # 평일(grid_am.json)과 주말(grid_am_we.json) 두 벌. 05_load.py 가 둘 다 굽고
+    # 화면의 요일 토글이 이 축을 씁니다. 주말 파일이 없으면 평일만 싣습니다 —
+    # 없는 것을 조용히 평일로 채우면 토글이 "둘 다 같은 화면"이 됩니다.
+    grids = {("wd", p): read(f"grid_{p}") for p in PERIODS}
+    for p in PERIODS:
+        try:
+            grids[("we", p)] = read(f"grid_{p}_we")
+        except FileNotFoundError:
+            pass
+    daytypes = sorted({d for d, _ in grids})
+    if "we" not in daytypes:
+        print("⚠ 주말 계약 JSON(grid_*_we.json)이 없어 평일만 적재합니다 — "
+              "화면의 주말 토글은 DB 모드에서 404 가 됩니다.")
 
     # 격자 뼈대는 am 기준 한 벌. (4시간대에서 아래 9개 필드가 같음은 확인했지만,
     # 데이터가 바뀌어 실제로 갈라지면 조용히 am 값이 이기는 대신 여기서 멈춥니다.)
-    base = {c["id"]: c for c in grids["am"]["cells"]}
+    base = {c["id"]: c for c in grids[("wd", "am")]["cells"]}
     FIXED = ("name", "region", "regionCode", "regionKind", "lon", "lat",
              "elderlyRatio", "nearestStopId")
-    for p in PERIODS[1:]:
-        for c in grids[p]["cells"]:
+    for (dt, p), g in grids.items():
+        for c in g["cells"]:
             b = base.get(c["id"])
             if b is None:
                 sys.exit(f"격자 {c['id']} 가 am 에 없습니다 — 계약 JSON 이 어긋났습니다")
@@ -152,16 +164,16 @@ def main() -> int:
     counts["batch_grid"] = len(base)
 
     rows = []
-    for p in PERIODS:
-        for c in grids[p]["cells"]:
+    for (dt, p), g in sorted(grids.items()):
+        for c in g["cells"]:
             rows.append((
-                c["id"], p, c["demand"], c["supply"], c["zDemand"], c["zSupply"],
+                c["id"], p, dt, c["demand"], c["supply"], c["zDemand"], c["zSupply"],
                 c["mi"], c["flow"], c["flowTripsPerDay"], c["coverage"],
                 c["quadrant"], c["action"], c["priorityScore"], Json(c["bins"]), run_id,
             ))
     execute_values(
         cur,
-        "INSERT INTO batch_grid_metrics (grid_id, period, demand, supply, z_demand,"
+        "INSERT INTO batch_grid_metrics (grid_id, period, daytype, demand, supply, z_demand,"
         " z_supply, mi, flow, flow_trips_per_day, coverage, quadrant, action,"
         " priority_score, bins, batch_run_id) VALUES %s",
         rows,
@@ -172,10 +184,12 @@ def main() -> int:
         cur,
         # KPI 는 안 넣습니다 — 격자에서 세는 값이라 저장하면 override 와 갈라집니다.
         # (근거는 schema_ops.sql 의 batch_grid_period 주석)
-        "INSERT INTO batch_grid_period (period, mi_thresholds, batch_run_id) VALUES %s",
-        [(p, Json(grids[p]["scale"]["miThresholds"]), run_id) for p in PERIODS],
+        "INSERT INTO batch_grid_period (period, daytype, mi_thresholds, batch_run_id)"
+        " VALUES %s",
+        [(p, dt, Json(g["scale"]["miThresholds"]), run_id)
+         for (dt, p), g in sorted(grids.items())],
     )
-    counts["batch_grid_period"] = len(PERIODS)
+    counts["batch_grid_period"] = len(grids)
 
     # ── 정류장 · 노선 · 프로필 ───────────────────────────────────────────────
     stops = read("stops")["stops"]
@@ -193,8 +207,12 @@ def main() -> int:
     execute_values(
         cur,
         "INSERT INTO batch_route (route_id, ord, name, type, stop_ids, path,"
-        " batch_run_id) VALUES %s",
-        [(r["id"], i, r["name"], r["type"], Json(r["stopIds"]), Json(r["path"]), run_id)
+        " ops, batch_run_id) VALUES %s",
+        # 조회용 컬럼 5개를 뺀 나머지(운행정보)는 ops 한 칸에 순서 그대로 담습니다.
+        # 계약 비교가 키 순서까지 바이트로 맞춰 보므로 dict 순서를 보존해야 합니다.
+        [(r["id"], i, r["name"], r["type"], Json(r["stopIds"]), Json(r["path"]),
+          Json({k: v for k, v in r.items()
+                if k not in ("id", "name", "type", "stopIds", "path")}), run_id)
          for i, r in enumerate(routes)],
     )
     counts["batch_route"] = len(routes)
