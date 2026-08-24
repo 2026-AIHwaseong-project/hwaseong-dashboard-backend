@@ -1,10 +1,24 @@
 # 관리자 콘솔 데이터 업로드 계획
 
 > 대상: `POST /api/v1/admin/upload`(신규) · `server/admin.py` `_run_refresh()` · 프론트 `admin.html` / `assets/js/admin.js`
-> 상태: **main 에 머지 완료(2026-08-24).** 업로드는 `HW_UPLOAD_ENABLED=1` 로 켜야 열리고,
-> 라이브 반영은 `HW_UPLOAD_APPLY=1` 이 따로 필요합니다 — 둘 다 기본 꺼짐이라 머지만으로는
-> 동작이 바뀌지 않습니다. 남은 것은 §4-12 의 **실서버 리허설**입니다.
+> 상태: **main 에 머지 완료 + 라이브 활성화(2026-08-24).** `HW_UPLOAD_ENABLED` 와
+> `HW_UPLOAD_APPLY` 는 이제 **둘 다 `docker-compose.yml` 기본값이 `1`** 입니다 — 시연
+> 항목이 되어, 배포마다 셸 변수를 기억해 넣는 방식이 "그날 아침에 잊으면 기능이 없는 것"과
+> 같아졌기 때문입니다. 즉 **머지·배포만으로 업로드와 라이브 반영이 모두 열립니다.**
+> 라이브 확인(2026-08-24): `GET /api/v1/admin/status` → `upload.enabled true`,
+> `applyEnabled true`, 대상 3종(stopsNational · flowHourly · boarding).
 > 로컬 실측: 예행 28초 · 라이브 파일 0개 변경 · 백엔드 테스트 147건 통과.
+>
+> ⚠ **`ADMIN_TOKEN` 은 여전히 미설정**이라 `require_write` 가 fail-open 입니다
+> (`server/admin.py:650`). 즉 주소를 아는 누구나 CSV 를 올리고 라이브 반영까지 시킬 수
+> 있습니다 — **의도적으로 그렇게 두기로 한 상태**이고, 되돌리려면 셸에서
+> `HW_UPLOAD_ENABLED=0` 으로 덮어쓰거나 `.env` 에 `ADMIN_TOKEN` 을 넣습니다.
+> 플래그는 요청마다 환경변수를 다시 읽으므로(`admin.py:252`) 재기동만 하면 즉시 반영됩니다.
+>
+> ⚠ **워커는 늘리면 안 됩니다.** 반영 경로의 마지막 단계 `reload` 는 요청을 받은 그
+> 프로세스의 메모리만 갈아끼웁니다(`admin.py:913-915`). 워커가 N 개면 1 개만 새 세대를 들고
+> 나머지가 옛 지도를 계속 서빙합니다. `JOB` 상태도 프로세스 지역이라 진행 폴링과
+> "이미 실행 중" 가드가 함께 깨집니다. 자세한 근거는 `Dockerfile` 의 `CMD` 위 주석에.
 >
 > **DB 반영은 발표 이후로 미룹니다.** `_run_refresh` 는 `DATABASE_URL` 이 있으면 업로드
 > 반영 시 `06_load_db.py` 까지 자동으로 돌립니다. 그런데 2026-08-24 운영 서버에서 DB 를
@@ -187,7 +201,9 @@ FastAPI는 본문을 **전부 버퍼링한 뒤에야** 핸들러를 부릅니다
 `docker-compose.yml`에 `mem_limit`.
 **위치**: `Caddyfile` · `server/main.py` 약 10줄 · `docker-compose.yml`
 
-**4) 킬 스위치 `HW_UPLOAD_ENABLED` — 기본 OFF** — 0.5h
+**4) 킬 스위치 `HW_UPLOAD_ENABLED`** — 0.5h
+*(계획 시점에는 기본 OFF 였습니다. 2026-08-24 자로 기본값을 `1` 로 바꿨습니다 — 위 머리말 참조.
+스위치 자체는 그대로 남아 있어 셸 변수로 언제든 되돌릴 수 있습니다.)*
 업로드 라우트는 환경변수가 켜져 있을 때만 존재하고, 아니면 404입니다.
 **업로드 본체보다 먼저 넣습니다** — 일정에서 잘려나가는 건 항상 뒤쪽이라,
 뒤에 두면 무방비로 공개된 채 발표를 맞게 됩니다.
