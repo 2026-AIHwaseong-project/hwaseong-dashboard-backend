@@ -30,7 +30,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")   # Windows 콘솔 한글 깨짐 방지
 sys.stderr.reconfigure(encoding="utf-8")
 from collections import defaultdict
-from datetime import date
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -51,7 +51,11 @@ PERIODS = ["am", "day", "pm", "night"]
 TRIP_RATE, BUS_SHARE = _params.TRIP_RATE, _params.BUS_SHARE
 BUS_TRIP_RATE = _params.BUS_TRIP_RATE
 MI_THRESHOLDS = _params.MI_THRESHOLDS
-TODAY = str(date.today())
+# 서버(EC2 컨테이너)는 UTC 로 돈다. date.today() 를 쓰면 KST 로 자정을 넘긴 직후
+# 재계산했을 때 meta.updatedAt 이 하루 이른 날짜로 찍힌다 — 화면의 "최종 갱신"과
+# 관리자 콘솔의 "데이터 빌드"가 어제로 보인다. server/admin.py 의 KST 와 같은 값이지만,
+# analysis/ 는 server/ 를 import 하지 않는다는 경계를 지키려고 여기에 따로 둔다.
+TODAY = str(datetime.now(timezone(timedelta(hours=9))).date())
 HOURS_LIST = list(range(5, 24))  # [5, 6, ..., 23]
 
 QUADRANT_LABEL = {

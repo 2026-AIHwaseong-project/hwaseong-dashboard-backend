@@ -46,7 +46,7 @@ import shutil
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +54,23 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
+
+# ─── 시각 정본 ────────────────────────────────────────────────────────────────
+# 컨테이너는 UTC 로 돈다. datetime.now() 를 그대로 쓰면 화면 이력·AI 보고서·백업
+# 폴더명이 전부 9시간 이르게 찍힌다 — 실제로 KST 00:11 에 한 반영이 "15:11" 로
+# 남아 있었다. 공문 초안에 나가는 시각이라 오차가 아니라 결함이다.
+#
+# TZ=Asia/Seoul 이나 zoneinfo.ZoneInfo("Asia/Seoul") 을 쓰지 않는 이유:
+# 베이스가 python:3.11-slim 이라 /usr/share/zoneinfo 가 없다. 둘 다 예외를 던지지
+# 않고 **조용히 UTC 로 되돌아가서**, 고쳤다고 믿는 상태로 같은 값이 계속 나온다.
+# 한국은 1988년 이후 서머타임이 없어 고정 오프셋 +09:00 이 항상 정확하다.
+KST = timezone(timedelta(hours=9), "KST")
+
+
+def now_kst() -> datetime:
+    """이 저장소에서 '지금'은 언제나 이 함수다. main.py 도 이것을 쓴다."""
+    return datetime.now(KST)
+
 
 ROOT = Path(__file__).resolve().parent.parent
 VAR = Path(os.environ.get("HW_VAR_DIR", str(ROOT / "var")))
@@ -402,7 +419,7 @@ def _accept_upload(req, spec: dict) -> dict:
 
     body = text.encode("utf-8-sig")     # 03_join 이 utf-8-sig 로 여는 계약을 여기서 맞춘다
     _prune_uploads()
-    uid = f"upload-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
+    uid = f"upload-{now_kst().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
     d = VAR / uid
     d.mkdir(parents=True, exist_ok=True)
     (d / spec["name"]).write_bytes(body)
@@ -540,7 +557,8 @@ def _append_history(event: dict) -> None:
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """이력·잡·보고서에 찍히는 모든 시각의 정본. 반드시 KST 다."""
+    return now_kst().isoformat(timespec="seconds")
 
 
 def effective(key: str):
@@ -757,7 +775,7 @@ def _prune_dirs(pattern: str, keep: int) -> None:
 
 async def _run_refresh(steps: list, reason: str, actor: str,
                        upload_id: Optional[str] = None, apply: bool = True) -> None:
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = now_kst().strftime("%Y%m%d-%H%M%S")   # 백업 폴더명도 KST
     pipeline_steps = [s for s in ("join", "model", "validate", "load") if s in steps]
     stage = None
     upload_meta: Optional[dict] = None

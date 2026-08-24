@@ -127,7 +127,7 @@ def _build_data_snapshot() -> dict:
     spec.loader.exec_module(m)
     src["sim"] = m
     src["_source"] = "db" if from_db else "json"
-    src["_loadedAt"] = datetime.now().isoformat(timespec="seconds")
+    src["_loadedAt"] = admin.now_kst().isoformat(timespec="seconds")
     return src
 
 
@@ -475,7 +475,7 @@ def _build_sim_response(sim, placements_raw: list, state: dict, name: str, budge
     return {
         "id": f"SIM-{int(time.time() * 1000) % 10_000_000}",
         "name": name,
-        "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "createdAt": admin.now_kst().strftime("%Y-%m-%d %H:%M"),
         "placements": pl_list,
         "cost": {"totalKrw": total_krw, "breakdown": breakdown},
         "budgetKrw": budget_krw,
@@ -1363,7 +1363,7 @@ def _fallback_report(period: str, kpi: dict, priorities: list, daytype: str = "w
         "org": "화성시", "dept": "교통정책과", "period": period,
         "provider": "규칙 기반 초안 (AI 미사용)", "model": None,
         "isAiGenerated": False,
-        "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "generatedAt": admin.now_kst().strftime("%Y-%m-%d %H:%M"),
         # 계약과 **같은 6장**을 낸다. 예전에는 2장(summary·priority)뿐이라,
         # 키가 죽으면 6장짜리 결재 문서가 2장으로 바뀌었다 — 폴백의 목적이
         # "버튼이 안 깨지게" 라면 문서의 뼈대도 같아야 목적이 완성된다.
@@ -1791,7 +1791,7 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
         result = _extract_json(text)
         if not isinstance(result, dict):
             raise json.JSONDecodeError("JSON 객체를 찾지 못했습니다", text[:200], 0)
-        result["generatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        result["generatedAt"] = admin.now_kst().strftime("%Y-%m-%d %H:%M")
         # 실제로 답한 프로바이더·모델을 표시한다 — 오픈라우터 폴백이 탔으면
         # 요청받은 provider(gemini)가 아니라 그 사실을 그대로 보여준다.
         result["provider"]    = _PROVIDERS[used_provider]["label"]
