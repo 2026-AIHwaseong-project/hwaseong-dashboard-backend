@@ -171,7 +171,15 @@ app.add_middleware(
 )
 # 시뮬레이션 응답(cellsByPeriod)이 1.5MB — JSON 이라 8~10배 압축됩니다.
 # 격자를 500m 로 세분화하면 4배가 더 커지므로 압축이 사실상 필수입니다.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+#
+# compresslevel=6 을 **명시**합니다. Starlette 기본값은 9(최대)인데, grid_am.json
+# (원본 383,340B)을 레벨별로 재 보면 level 6 → 38,845B/9.8ms, level 9 → 35,923B/20.3ms
+# 입니다 — 6→9 로 올려 얻는 건 바이트 7.5% 인데 CPU 는 2.07배입니다. 대시보드 콜드
+# 로드 전체로는 693ms(gzip) vs 221ms(무압축)라 서버 CPU 의 68%가 압축이었습니다.
+# 이 서버는 워커가 1개(아래 CMD 참조)라 그 CPU 가 곧 전체 처리량이고, 배포 대상이
+# t2.small(vCPU 1개)이라 프로세스를 늘려 만회할 수도 없습니다. 이 한 인자가 동시
+# 접속 한계를 대략 2배로 올립니다 — 실측 동시 20명 15.7초가 붕괴 지점이었습니다.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 # 업로드 본문 상한 — FastAPI 는 본문을 **전부 버퍼링한 뒤에야** 의존성을 풀고
 # 핸들러를 부른다. 즉 라우트 안의 어떤 크기 검사도 이미 다 받아버린 뒤의 사후

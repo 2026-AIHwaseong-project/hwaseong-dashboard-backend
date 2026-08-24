@@ -76,7 +76,8 @@ def _start_server(host: str, port: int, reload: bool):
         host=host,
         port=port,
         reload=reload,
-        workers=1,          # 05_simulate.py 프로세스 공유 불가
+        workers=1,          # 05_simulate 프로세스 공유 불가 + reload/JOB 이 프로세스 지역
+                            # (근거는 Dockerfile CMD 위 주석에 전부 적어 뒀다)
         log_level="info",
     )
 
