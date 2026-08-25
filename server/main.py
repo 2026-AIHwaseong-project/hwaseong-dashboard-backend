@@ -714,6 +714,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
     gid_region = {gid: base_cells_am.get(gid, {}).get("region", "") for gid in sim.GIDS}
 
     stopped = "max_reached"
+    geo_cache: dict = {}     # (mode, gi) -> (idx, ms, wsub) — 아래 후보 루프 주석 참조
     min_cost = min(COST_KRW[m] for m in (["stop"] if strategy == "quick" else allowed_types))
     if budget < min_cost:
         return [], state, "budget_too_small", state_we
@@ -782,21 +783,32 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                         continue
 
                 # ── 영향권 인덱스 (시간대 무관) ──
+                # idx·ms·wsub 는 **격자 좌표만으로** 정해진다 — 배치가 쌓여도
+                # 안 변한다. 그런데 이 블록은 그리디 스텝마다 후보 전체에 대해
+                # 다시 돌아, freq 후보 하나가 정류장 2,866개와의 거리를 max_pl
+                # 번(기본 10) 똑같이 다시 재고 Wsg 부분행렬도 매번 새로 떴다.
+                # 요청 안에서만 사는 캐시라 sim 이 관리자 재적재로 갈려도
+                # 다음 요청은 새 sim 으로 다시 채운다.
                 d = sim.Dg[gi]
-                if mode == "stop":
-                    # freq 는 WALK(800m) 안, nearest 는 R_FINAL.stop(800m) 안에서만
-                    # 변한다 — 둘 다 800m 라 하나의 마스크로 충분하다.
-                    idx = np.where(d <= sim.WALK)[0]
-                    ms = mult = None
-                elif mode == "drt":
-                    idx = np.where(d <= sim.R_FINAL["drt"])[0]
-                    ms = mult = None
-                else:  # freq — 선택 정류장들의 도보권에 있는 셀만 영향
-                    ds = np.sqrt((sim.SX - sim.GX[gi])**2 + (sim.SY - sim.GY[gi])**2)
-                    ms = np.where(ds <= sim.R_FINAL["freq"])[0]
-                    cnt = freq_cnt.get(gi, 0)
-                    mult = sim.HEADWAY_MULT ** (cnt + 1) - sim.HEADWAY_MULT ** cnt
-                    idx = np.where(sim.Wsg[:, ms].sum(axis=1) > 0)[0]
+                geo = geo_cache.get((mode, gi))
+                if geo is None:
+                    if mode == "stop":
+                        # freq 는 WALK(800m) 안, nearest 는 R_FINAL.stop(800m) 안에서만
+                        # 변한다 — 둘 다 800m 라 하나의 마스크로 충분하다.
+                        geo = (np.where(d <= sim.WALK)[0], None, None)
+                    elif mode == "drt":
+                        geo = (np.where(d <= sim.R_FINAL["drt"])[0], None, None)
+                    else:  # freq — 선택 정류장들의 도보권에 있는 셀만 영향
+                        ds = np.sqrt((sim.SX - sim.GX[gi])**2 + (sim.SY - sim.GY[gi])**2)
+                        _ms = np.where(ds <= sim.R_FINAL["freq"])[0]
+                        _idx = np.where(sim.Wsg[:, _ms].sum(axis=1) > 0)[0]
+                        geo = (_idx, _ms, sim.Wsg[np.ix_(_idx, _ms)])
+                    geo_cache[(mode, gi)] = geo
+                idx, ms, wsub = geo
+                # mult 만은 스텝마다 다르다 — 같은 격자에 증편이 쌓일수록 체감한다.
+                cnt = freq_cnt.get(gi, 0)
+                mult = (sim.HEADWAY_MULT ** (cnt + 1) - sim.HEADWAY_MULT ** cnt
+                        if mode == "freq" else None)
                 if len(idx) == 0:
                     continue
 
@@ -813,7 +825,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                         r = sim.R_FINAL["drt"]
                         f_sub = f_sub + sim.PHI[p] * (1 - d[idx] / r)
                     else:
-                        f_sub = f_sub + sim.Wsg[np.ix_(idx, ms)] @ (sim.STOP_FREQ[p][ms] * mult)
+                        f_sub = f_sub + wsub @ (sim.STOP_FREQ[p][ms] * mult)
                     c_sub = np.clip(1 - n_sub / sim.COVM, 0.05, 1.0)
                     # sim.Bhat 의 부분 평가 — 같은 식을 idx 셀에만 적용
                     P = sim.POIS[p]
@@ -837,7 +849,7 @@ def _greedy(sim, strategy: str, budget: int, max_pl: int,
                         elif mode == "drt":
                             fwe_sub = fwe_sub + sim.PHI[p] * (1 - d[idx] / sim.R_FINAL["drt"])
                         else:
-                            fwe_sub = fwe_sub + sim.Wsg[np.ix_(idx, ms)] @ (sim.STOP_FREQ_WE[p][ms] * mult)
+                            fwe_sub = fwe_sub + wsub @ (sim.STOP_FREQ_WE[p][ms] * mult)
                         cwe_sub = np.clip(1 - nwe_sub / sim.COVM, 0.05, 1.0)
                         Pwe = sim.POIS_WE[p]
                         bwe_sub = Pwe["mu"][idx] * np.exp(np.clip(
