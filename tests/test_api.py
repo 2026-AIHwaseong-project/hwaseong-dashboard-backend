@@ -363,7 +363,8 @@ def test_providers_contract(c):
 
 def test_report_falls_back_without_key(c, monkeypatch):
     """키가 없어도 「AI 보고서 생성」 버튼이 깨지면 안 된다."""
-    for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "AI_PROVIDER"):
+    for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
+              "OPENROUTER_API_KEY", "AI_PROVIDER"):
         monkeypatch.delenv(k, raising=False)
     j = c.post("/api/v1/reports/draft", json={"period": "am"}).json()
     assert j["isAiGenerated"] is False
@@ -376,7 +377,8 @@ def test_report_falls_back_without_key(c, monkeypatch):
 
 def test_chat_unavailable_without_key(c, monkeypatch):
     """키가 없을 때 500 이 아니라 사람이 읽을 메시지여야 한다."""
-    for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "AI_PROVIDER"):
+    for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
+              "OPENROUTER_API_KEY", "AI_PROVIDER"):
         monkeypatch.delenv(k, raising=False)
     r = c.post("/api/v1/chat", json={"messages": [{"role": "user", "content": "MI가 뭐야?"}]})
     assert r.status_code == 200
