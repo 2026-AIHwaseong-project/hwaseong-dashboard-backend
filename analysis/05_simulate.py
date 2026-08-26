@@ -243,9 +243,12 @@ def Bhat(p, freq, cov, dt="wd"):
     )
 
 
-def dB_hat(p, dfreq, dcov):
-    P = POIS[p]
-    dl = np.log1p(S0[p]["freq"] + dfreq) - P["lq0"]
+def dB_hat(p, dfreq, dcov, dt="wd"):
+    """Bhat 과 같은 이유로 dt 를 받는다 — 인터랙티브 시뮬레이션이 요일 토글을
+    갖게 되면서(server/main.py SimRequest.daytype) 평일 고정이던 이 함수도
+    주말 기준선을 받아야 했다."""
+    P, ss = (POIS[p], S0[p]) if dt == "wd" else (POIS_WE[p], S0_WE[p])
+    dl = np.log1p(ss["freq"] + dfreq) - P["lq0"]
     return float(np.sum(P["mu"] * (np.exp(np.clip(P["b2"] * dl + P["b3"] * dcov, -20, 6)) - 1)))
 
 
