@@ -25,6 +25,7 @@ import json
 import asyncio
 import os
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -154,8 +155,10 @@ async def lifespan(app: FastAPI):
     # 관리자 오버라이드 주입 — 반드시 스냅샷 적재 "직후". admin.apply_runtime_params 는
     # COST_KRW·sim 모듈 속성·meta 를 한 번에 갱신한다 (server/admin.py 참고).
     admin.init(DATA=DATA, COST_KRW=COST_KRW, PERIODS=PERIODS,
-               build_snapshot=_build_data_snapshot)
+               build_snapshot=_build_data_snapshot,
+               QUAD_LABEL=QUAD_LABEL, ACTION_LABEL=ACTION_LABEL)
     admin.apply_runtime_params()
+    admin.apply_grid_overrides()   # 격자 판정 오버라이드 — 스냅샷 원값 위에 주입
     admin.warn_if_open()
     yield
 
@@ -990,9 +993,16 @@ def run_recommendations(req: RecRequest):
         region_ids = {c["id"] for c in DATA["cells"]["am"].values()
                       if c["region"] == req.region}
 
-    # region 이 오면 balance(지역 균형)는 성립하지 않는다. 동별 1건 상한이
-    # 곧 1건 추천이라서다. efficiency 로 대체하고 alternatives 에서도 뺀다.
-    strategy = "efficiency" if (region_ids is not None and req.strategy == "balance") else req.strategy
+    # region(읍면동 하나)이 오면 balance(지역 균형)는 성립하지 않는다 — 동별 1건
+    # 상한이 곧 1건 추천이라서다. efficiency 로 대체하고 목록에서도 뺀다.
+    #
+    # 지도 영역(cellIds)은 **다르다**. 끌어서 그린 영역은 여러 읍면동에 걸칠 수
+    # 있어 "영역 안에서 동별 1개씩"이 뜻 있는 전략이다(_greedy 의 region_cnt 는
+    # 후보가 어떤 집합이든 동 단위로 센다). 한때 cellIds 까지 묶어 치환했더니
+    # 영역을 지정하면 화면에서 지역 균형 탭이 사라져 고를 수 없었다 — 성립하지
+    # 않는 것과 결과가 적은 것(단일 동짜리 영역)은 다른 문제다.
+    single_region_scope = req.cellIds is None and bool(req.region)
+    strategy = "efficiency" if (single_region_scope and req.strategy == "balance") else req.strategy
 
     placed, final_state, stopped, final_state_we = _greedy(
         sim, strategy, req.budgetKrw, req.maxPlacements,
@@ -1104,12 +1114,12 @@ def run_recommendations(req: RecRequest):
         "strategyLabel": STRAT_META[strategy]["label"],
         "strategyNote": STRAT_META[strategy]["note"],
         "note": STRAT_META[strategy]["note"],
-        # balance 제외 조건은 치환 조건(위 region_ids)과 같아야 한다. req.region 만
-        # 보면 지도 영역(cellIds)으로 제한한 상태에서 balance 가 목록에 남아,
-        # 고르면 조용히 efficiency 결과가 돌아온다.
+        # balance 제외 조건은 치환 조건(위 single_region_scope)과 같아야 한다 —
+        # 어긋나면 목록에 남은 탭을 고르는 순간 조용히 efficiency 결과가 돌아오거나,
+        # 반대로 성립하는 전략(여러 동에 걸친 영역)의 탭이 화면에서 사라진다.
         "strategies": [{"id": k, "label": v["label"], "note": v["note"]}
                        for k, v in STRAT_META.items()
-                       if not (region_ids is not None and k == "balance")],
+                       if not (single_region_scope and k == "balance")],
         "budgetKrw": req.budgetKrw,
         "usedKrw": total_krw,
         "remainingKrw": req.budgetKrw - total_krw,
@@ -1146,7 +1156,7 @@ def run_recommendations(req: RecRequest):
     if req.includeAlternatives:
         alts = []
         for s in ["efficiency", "equity", "balance", "quick"]:
-            if s == strategy or (region_ids is not None and s == "balance"):
+            if s == strategy or (single_region_scope and s == "balance"):
                 continue
             alt_types = ["stop"] if s == "quick" else list(req.allowedTypes)
             try:
@@ -1166,6 +1176,68 @@ def run_recommendations(req: RecRequest):
         result["alternatives"] = alts
 
     return _json(result)
+
+
+# ─── 8b. 시나리오 공유 ─────────────────────────────────────────────────────────
+#
+# schema_ops.sql 의 scenario 테이블("공유 URL 의 실체")을 파일 기반으로 구현한다.
+# 시나리오가 localStorage(hw.scenarios, 최대 12건)에만 있으면 담당자 PC 브라우저에
+# 갇힌다 — "윗선·의회에 설명하는 도구"라는 제품 정의와 어긋나는 지점이라, 저장 후
+# 링크(?scenario=id)로 다른 사람이 같은 배치안을 그대로 열 수 있게 한다.
+#
+# var/ 아래에 두는 이유는 params_override 와 같다 — compose 바인드 마운트라
+# 재배포를 넘어 살아남고, DB 없이(기본 배포) 동작한다. 쓰기는 공개다 —
+# /simulations 와 같은 신뢰 모델이고, 입력은 같은 _validate_placements 로 막는다.
+SCEN_DIR = admin.VAR / "scenarios"     # HW_VAR_DIR 격리를 관리자 파일들과 함께 따른다
+SCEN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,32}$")   # token_urlsafe 산출 형식 — 경로 탈출 차단
+MAX_SCENARIOS = 2000    # 폴더 상한. 오래된 것을 조용히 지우면 공유해 둔 링크가 죽으므로
+                        # 지우지 않고 막는다 — 발표·시연 규모에서 닿을 일 없는 백스톱.
+
+
+class ScenarioSaveRequest(BaseModel):
+    name: str = ""
+    period: str = "am"
+    budgetKrw: Optional[int] = None
+    placements: list = []
+
+
+@app.post("/api/v1/scenarios")
+def save_scenario(req: ScenarioSaveRequest):
+    _chk_period(req.period)
+    sim = DATA["sim"]
+    placements = _validate_placements(sim, req.placements)
+    if not placements:
+        raise HTTPException(400, "빈 시나리오는 공유할 수 없습니다 — 배치를 한 건 이상 넣으세요.")
+    budget = req.budgetKrw if req.budgetKrw is not None else admin.effective("cost.defaultBudget")
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 0:
+        raise HTTPException(400, f"budgetKrw 는 0 이상의 정수여야 합니다 (받은 값: {req.budgetKrw!r})")
+    # 제어문자만 걷어낸다 — 표시는 프론트가 esc() 로 이스케이프한다.
+    name = re.sub(r"[\x00-\x1f\x7f]", "", str(req.name or "")).strip()[:80]
+
+    SCEN_DIR.mkdir(parents=True, exist_ok=True)
+    if sum(1 for _ in SCEN_DIR.glob("*.json")) >= MAX_SCENARIOS:
+        raise HTTPException(409, "저장된 공유 시나리오가 상한에 닿았습니다 — "
+                                 "서버 운영자가 var/scenarios/ 를 정리해야 합니다.")
+    sid = secrets.token_urlsafe(9)          # 12자, SCEN_ID_RE 형식
+    doc = {"id": sid, "name": name, "period": req.period, "budgetKrw": budget,
+           "placements": placements, "createdAt": admin.now_kst().isoformat(timespec="seconds")}
+    tmp = SCEN_DIR / f"{sid}.tmp"
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), "utf-8")
+    os.replace(tmp, SCEN_DIR / f"{sid}.json")
+    # 열 때는 프론트 주소에 ?scenario=id 만 붙이면 된다 — 서버는 경로만 알려준다.
+    return _json({"ok": True, "id": sid, "path": f"/api/v1/scenarios/{sid}",
+                  "scenario": doc})
+
+
+@app.get("/api/v1/scenarios/{sid}")
+def get_scenario(sid: str):
+    if not SCEN_ID_RE.match(sid):
+        raise HTTPException(400, "잘못된 시나리오 id 형식입니다.")
+    f = SCEN_DIR / f"{sid}.json"
+    if not f.exists():
+        raise HTTPException(404, "시나리오를 찾을 수 없습니다 — 링크가 잘못됐거나 "
+                                 "서버에서 정리됐을 수 있습니다.")
+    return _json(json.loads(f.read_text("utf-8")))
 
 
 # ─── 9. POST /api/v1/reports/draft ────────────────────────────────────────────

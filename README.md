@@ -25,7 +25,7 @@
 | 승차 예측 회귀 (공간 CV, log) | **0.852** — 승차의 98%가 일어나는 354격자만 봐도 **0.808** |
 | 배차 탄력성 | **+0.549** (배차를 늘리면 승차가 는다) |
 | 정성 대조 | 공개근거 6건 확보 · 그중 **4건이 현재 Top5** (목표 3건) |
-| API | FastAPI 엔드포인트 10개 · DB 없이 정적 JSON 으로 동작 |
+| API | FastAPI 엔드포인트 12개 · DB 없이 정적 JSON 으로 동작 |
 
 수치의 정본은 `dataset_hwaseong/validation.json` 과 실서버 응답입니다.
 README 의 값은 그 스냅샷이므로, 다르면 산출물 쪽이 맞습니다.
@@ -171,7 +171,7 @@ DB 를 끄고 원래대로 돌아가려면 `DATABASE_URL` 을 지우고 서버�
 
 ## 2. API
 
-엔드포인트 10개. 명세와 응답 예시는 **[docs/API_SPEC.md](docs/API_SPEC.md)** 가 정본입니다.
+엔드포인트 12개. 명세와 응답 예시는 **[docs/API_SPEC.md](docs/API_SPEC.md)** 가 정본입니다.
 
 | 메서드 | 경로 | 내용 |
 |---|---|---|
@@ -185,6 +185,8 @@ DB 를 끄고 원래대로 돌아가려면 `DATABASE_URL` 을 지우고 서버�
 | POST | `/api/v1/recommendations` | 예산 제약 하 추천 배치안 |
 | GET | `/api/v1/providers` | 사용 가능한 AI 프로바이더 |
 | POST | `/api/v1/reports/draft` | AI 보고서 초안 |
+| POST | `/api/v1/scenarios` | 시나리오 공유 저장 (공유 링크의 실체) |
+| GET | `/api/v1/scenarios/{id}` | 공유 시나리오 조회 |
 
 정적 마운트가 둘 더 있습니다 — `/data`(계약 JSON), `/app`(프론트 화면).
 
@@ -888,13 +890,13 @@ pyproj 를 부르지 않으려고 lon/lat → 5179 변환을 2차 다항 회귀�
 ├── requirements.txt            의존성 정본
 ├── Dockerfile · docker-compose.yml
 ├── docs/
-│   └── API_SPEC.md             ⬅ 엔드포인트 10개 명세 (정본)
+│   └── API_SPEC.md             ⬅ 엔드포인트 12개 명세 (정본)
 ├── analysis/                   데이터 파이프라인 (§7 참고)
 │   ├── 06_load_db.py           계약 JSON → PostgreSQL 적재 (선택)
 │   ├── 06_verify_db.py         DB 모드 == JSON 모드 바이트 검증 (선택)
 │   └── schema.sql              초기 DuckDB 스키마 설계안 — 현재 미사용
 ├── server/
-│   ├── main.py                 FastAPI — 엔드포인트 10개 + /data·/app 마운트
+│   ├── main.py                 FastAPI — 엔드포인트 12개 + /data·/app 마운트
 │   ├── db.py                   DATABASE_URL 이 있으면 DB 에서 읽음 (없으면 JSON)
 │   ├── static/                 ★ 계약 JSON 12개 (05_load.py 산출)
 │   └── schema_ops.sql          PostgreSQL 운영 스키마
@@ -953,6 +955,13 @@ pyproj 를 부르지 않으려고 lon/lat → 5179 변환을 2차 다항 회귀�
 
 **`server/schema_ops.sql` 이 그 확장의 실체입니다.** 관리자 수정을 붙이려면
 `batch_*`/`admin_*`/`v_*` 소유권 분리가 그대로 필요합니다.
+
+> 2026-08-26 — 격자 판정 수정(사분면·수단 배지·우선순위 점수)은 **파일 기반으로
+> 먼저 구현했습니다**(`var/admin/grid_override.json` + 관리자 콘솔 「격자 판정 수정」
+> 카드, `server/admin.py` 의 `/api/v1/admin/grid-overrides`). params_override 와 같은
+> 방식이라 DB 없이 동작하고 재계산·재배포에도 살아남습니다. 아래 `admin_grid_override`
+> 테이블·뷰는 DB 확장 경로로 그대로 남습니다 — 소유권 분리 원칙(배치가 사람 수정을
+> 못 지움, revoke 는 삭제가 아니라 이력)은 파일 구현이 같은 규칙을 따릅니다.
 
 | 접두사 | 소유자 | 규칙 |
 |---|---|---|
@@ -1078,7 +1087,7 @@ DB 는 그 옆에 붙습니다: `server/static/*.json` → `06_load_db.py` → `
 
 | 문서 | 내용 |
 |---|---|
-| [docs/API_SPEC.md](docs/API_SPEC.md) | 엔드포인트 10개 명세 · 응답 예시 **(정본)** |
+| [docs/API_SPEC.md](docs/API_SPEC.md) | 엔드포인트 12개 명세 · 응답 예시 **(정본)** |
 | [docs/REPORT_PIPELINE_PLAN.md](docs/REPORT_PIPELINE_PLAN.md) | AI 보고서 생성 경로 보강 — 계획과 구현 결과 |
 | [docs/ADMIN_UPLOAD_PLAN.md](docs/ADMIN_UPLOAD_PLAN.md) | 관리자 콘솔 CSV 업로드 — 계획과 구현 결과 (main 머지 + 라이브 활성화 2026-08-24, 잔여 항목은 문서 헤더 참고) |
 

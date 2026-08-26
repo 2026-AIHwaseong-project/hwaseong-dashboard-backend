@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -79,11 +80,13 @@ OVERRIDE_PATH = ADMIN_DIR / "params_override.json"
 HISTORY_PATH = ADMIN_DIR / "params_history.jsonl"
 
 # main.py 가 lifespan 에서 주입한다 (순환 import 방지).
-_ctx: dict = {"DATA": None, "COST_KRW": None, "PERIODS": None, "build_snapshot": None}
+_ctx: dict = {"DATA": None, "COST_KRW": None, "PERIODS": None, "build_snapshot": None,
+              "QUAD_LABEL": None, "ACTION_LABEL": None}
 
 
-def init(DATA, COST_KRW, PERIODS, build_snapshot):
-    _ctx.update(DATA=DATA, COST_KRW=COST_KRW, PERIODS=PERIODS, build_snapshot=build_snapshot)
+def init(DATA, COST_KRW, PERIODS, build_snapshot, QUAD_LABEL=None, ACTION_LABEL=None):
+    _ctx.update(DATA=DATA, COST_KRW=COST_KRW, PERIODS=PERIODS, build_snapshot=build_snapshot,
+                QUAD_LABEL=QUAD_LABEL, ACTION_LABEL=ACTION_LABEL)
 
 
 def _load_params_module():
@@ -104,59 +107,62 @@ PARAMS = _load_params_module()
 # scope: runtime  = 요청 시점에 읽혀 즉시 반영 (편집 가능)
 #        pipeline = 계약 JSON 에 구워짐 — 재계산 경로가 오버라이드를 읽는 P3 에서 개방
 # 기본값은 코드 정본과 같아야 한다. 어긋나면 기동 시 드리프트 검사가 잡는다.
+# 범위(min/max)는 두지 않는다 — 극단값 실험은 운영자의 자유다(2026-08-26 제거).
+# 저장 검증에는 형·유한성 검사와, 서버를 실제로 죽이는 값 하나(비용 ≤ 0 —
+# 추천의 비용효율 ΔB̂/비용 나눗셈)만 남긴다.
 SPECS = {
     "sim.headwayMult": dict(
-        label="배차 증편 배수", unit="×", type="float", min=1.01, max=2.0, default=1.43,
+        label="배차 증편 배수", unit="×", type="float", default=1.43,
         scope="runtime", group="effect",
         note="증편 1회 = 배차간격 ×0.70 (운행횟수 ×1.43). 마을버스 실측 배차 근거.",
         applies="시뮬레이션·추천의 증편 효과 (요청 시점 반영)"),
-    "sim.fstar.am": dict(label="신설 주입량 f* — 출근", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.fstar.am": dict(label="신설 주입량 f* — 출근", unit="회/창", type="float",
                          default=4.8, scope="runtime", group="effect",
                          note="마을버스 120노선 실측 배차 중앙값(출퇴근 25분)에서 환산.",
                          applies="정류장 신설 배치의 출근 시간대 효과"),
-    "sim.fstar.day": dict(label="신설 주입량 f* — 낮", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.fstar.day": dict(label="신설 주입량 f* — 낮", unit="회/창", type="float",
                           default=8.0, scope="runtime", group="effect",
                           note="평일 60분 배차 → 8시간 창 환산.", applies="정류장 신설 배치의 낮 효과"),
-    "sim.fstar.pm": dict(label="신설 주입량 f* — 퇴근", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.fstar.pm": dict(label="신설 주입량 f* — 퇴근", unit="회/창", type="float",
                          default=4.8, scope="runtime", group="effect",
                          note="출퇴근 25분 배차 환산.", applies="정류장 신설 배치의 퇴근 효과"),
-    "sim.fstar.night": dict(label="신설 주입량 f* — 심야", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.fstar.night": dict(label="신설 주입량 f* — 심야", unit="회/창", type="float",
                             default=0.0, scope="runtime", group="effect",
                             note="0 이 설계 의도 — 심야 신설이 즉시 효과를 낸다는 실측 근거가 없다.",
                             applies="정류장 신설 배치의 심야 효과"),
-    "sim.phi.am": dict(label="똑버스 주입량 φ — 출근", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.phi.am": dict(label="똑버스 주입량 φ — 출근", unit="회/창", type="float",
                        default=2.4, scope="runtime", group="effect",
                        note="차량 1대 1.2회/h → 2시간 창 환산.", applies="똑버스 배치의 출근 효과"),
-    "sim.phi.day": dict(label="똑버스 주입량 φ — 낮", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.phi.day": dict(label="똑버스 주입량 φ — 낮", unit="회/창", type="float",
                         default=9.6, scope="runtime", group="effect",
                         note="1.2회/h × 8시간 창.", applies="똑버스 배치의 낮 효과"),
-    "sim.phi.pm": dict(label="똑버스 주입량 φ — 퇴근", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.phi.pm": dict(label="똑버스 주입량 φ — 퇴근", unit="회/창", type="float",
                        default=2.4, scope="runtime", group="effect",
                        note="1.2회/h × 2시간 창.", applies="똑버스 배치의 퇴근 효과"),
-    "sim.phi.night": dict(label="똑버스 주입량 φ — 심야", unit="회/창", type="float", min=0.0, max=20.0,
+    "sim.phi.night": dict(label="똑버스 주입량 φ — 심야", unit="회/창", type="float",
                           default=2.4, scope="runtime", group="effect",
                           note="1.2회/h × 2시간 창.", applies="똑버스 배치의 심야 효과"),
     "cost.stop.krw": dict(label="정류장 신설 단가", unit="원", type="int",
-                          min=1_000_000, max=500_000_000, default=42_000_000,
+                          default=42_000_000,
                           scope="runtime", group="cost",
                           note="1회성 시설비(내용연수 10년). 공개단가 미확인 — 가정값.",
                           applies="시뮬레이션 비용·추천 순위(비용효율)·화면 단가 표기"),
     "cost.drt.krw": dict(label="똑버스 단가", unit="원/년", type="int",
-                         min=10_000_000, max=2_000_000_000, default=180_000_000,
+                         default=180_000_000,
                          scope="runtime", group="cost",
                          note="경기교통공사 표준운송원가 대비 6~12% 보수적.",
                          applies="시뮬레이션 비용·추천 순위·화면 단가 표기"),
     "cost.freq.krw": dict(label="배차 증편 단가", unit="원/년", type="int",
-                          min=10_000_000, max=2_000_000_000, default=95_000_000,
+                          default=95_000_000,
                           scope="runtime", group="cost",
                           note="화성시 마을버스 연간 운송원가 대비 1.8% 이내 대조.",
                           applies="시뮬레이션 비용·추천 순위·화면 단가 표기"),
     "cost.defaultBudget": dict(label="기본 예산 한도", unit="원", type="int",
-                               min=100_000_000, max=1_000_000_000_000, default=3_000_000_000,
+                               default=3_000_000_000,
                                scope="runtime", group="cost",
                                note="시연용 기본값. 화면에서 건별로 바꿀 수 있다.",
                                applies="예산 미지정 요청의 기본값·시뮬 화면 초기 예산"),
-    "rec.maxPlacements": dict(label="추천 최대 배치 건수", unit="건", type="int", min=1, max=50,
+    "rec.maxPlacements": dict(label="추천 최대 배치 건수", unit="건", type="int",
                               default=10, scope="runtime", group="cost",
                               note="화면은 자체 기본 10건을 명시 전송한다 — 이 값은 API 직접 호출과 "
                                    "향후 화면 연동에 적용.",
@@ -175,14 +181,14 @@ SPECS = {
     #    끼어도 사고가 난다. 재계산 경로가 오버라이드를 안전하게 반영하도록
     #    정리되기 전까지는 열지 않는다.
     "model.busTripRate": dict(label="인구→통행 환산계수", unit="통행/인·일", type="float",
-                              min=0.05, max=1.0, default=0.25,
+                              default=0.25,
                               scope="pipeline", group="model", locked=True,
                               note="전수단 원단위 2.5 × 버스 분담률 0.10 — 가정값. "
                                    "격자 JSON 에 구워지는 값이라 파이프라인을 다시 돌려야 "
                                    "바뀝니다.",
                               applies="잠재수요 KPI(flowTripsPerDay) — 읽기 전용"),
     "model.minFreqPerHour": dict(label="적정 판정 절대 하한", unit="회/h", type="float",
-                                 min=0.5, max=6.0, default=2.0,
+                                 default=2.0,
                                  scope="pipeline", group="model", locked=True,
                                  note="야간 상대평가 오라벨 방지 가드. 격자 산출물에 구워지는 "
                                       "값이라 파이프라인을 다시 돌려야 바뀝니다.",
@@ -630,6 +636,132 @@ def apply_runtime_params() -> dict:
     return eff
 
 
+# ─── 격자 판정 오버라이드 ──────────────────────────────────────────────────────
+#
+# schema_ops.sql 의 admin_grid_override 가 설계한 기능의 파일 기반 구현이다.
+# DB 없이도(기본 배포 = 계약 JSON 모드) 동작해야 해서 params_override 와 같은
+# var/admin 파일 방식을 쓴다 — var/ 는 compose 에서 바인드 마운트라 재배포를
+# 넘어 살아남고, 재계산(batch)이 이 파일을 건드리지 않으므로 "배치를 몇 번
+# 돌려도 사람이 고친 값이 살아남는다"는 스키마의 요점이 그대로 성립한다.
+#
+# 1단계에서 여는 필드는 판정 계층 셋뿐이다 — quadrant(사분면) · action(수단
+# 배지) · priorityScore(우선순위 점수). 숫자 지표(mi·demand·supply)는 색 bin·
+# 산점도·시뮬 기준선과 얽혀 있어 반쪽 수정이 된다(값만 바꾸면 지도 색은 그대로,
+# bin 까지 다시 매기려면 norm_stats 를 통째로 끌어와야 한다). 스키마는 여섯
+# 필드를 정의하지만 나머지 셋은 그 얽힘을 풀 때 연다.
+#
+# ⚠️ 오버라이드는 **표시·판단 계층**이다. 시뮬레이션·추천의 기준선은
+# grid_metrics.csv 에서 온 sim 모듈 상태라 여기 영향을 받지 않는다 — 관리자가
+# 격자를 need 로 고쳐도 추천 후보 선정은 모델 값을 따른다. KPI(needCells 등)는
+# 셀에서 재집계하므로 함께 움직인다(db._kpi — "지도만 붉어지고 KPI 는 그대로"
+# 사고 방지).
+GRID_OVERRIDE_PATH = ADMIN_DIR / "grid_override.json"
+
+GRID_FIELDS = {
+    "quadrant":      dict(kind="text", allowed=("need", "drt", "over", "ok", "mid")),
+    "action":        dict(kind="text", allowed=("DRT", "NEW_STOP", "ADD_FREQ")),
+    "priorityScore": dict(kind="num"),
+}
+
+
+def _read_grid_overrides() -> list:
+    """전체 기록(취소분 포함)을 돌려준다 — 되돌리기는 삭제가 아니라 revokedAt."""
+    try:
+        doc = json.loads(GRID_OVERRIDE_PATH.read_text("utf-8"))
+        recs = doc.get("overrides", [])
+        return recs if isinstance(recs, list) else []
+    except FileNotFoundError:
+        return []
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[admin] grid_override.json 을 읽지 못했습니다 — 무시하고 계속: {e}",
+              file=sys.stderr, flush=True)
+        return []
+
+
+def _write_grid_overrides(recs: list) -> None:
+    ADMIN_DIR.mkdir(parents=True, exist_ok=True)
+    doc = {"version": 1, "updatedAt": _now(), "overrides": recs}
+    tmp = GRID_OVERRIDE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), "utf-8")
+    os.replace(tmp, GRID_OVERRIDE_PATH)
+
+
+def _grid_payload(period: str, daytype: str):
+    DATA = _ctx["DATA"] or {}
+    key = f"grid_{period}" if daytype == "wd" else f"grid_{period}_we"
+    return DATA.get(key)
+
+
+def _find_cell(payload: dict, grid_id: str):
+    for c in payload.get("cells", []):
+        if c["id"] == grid_id:
+            return c
+    return None
+
+
+def _set_cell_field(cell: dict, field: str, value) -> None:
+    """필드와 그 파생 라벨을 함께 바꾼다 — 라벨을 빼먹으면 지도 툴팁·표가
+    옛 한글 라벨로 남아 값과 라벨이 서로 다른 말을 한다."""
+    cell[field] = value
+    if field == "quadrant":
+        cell["quadrantLabel"] = (_ctx.get("QUAD_LABEL") or {}).get(value, value)
+    elif field == "action":
+        cell["actionLabel"] = (_ctx.get("ACTION_LABEL") or {}).get(value, value)
+
+
+def _recount_kpi(payload: dict) -> None:
+    from server import db          # 순수 함수만 쓴다 — psycopg2 는 함수 안 지연 import
+    payload["kpi"] = db._kpi(payload["cells"])
+
+
+def _live_grid_overrides(recs: list):
+    return [r for r in recs if not r.get("revokedAt")]
+
+
+def _refresh_cell_override_flag(cell: dict, recs: list, period: str, daytype: str) -> None:
+    cell["overridden"] = any(
+        r["gridId"] == cell["id"] and r["period"] == period and r["daytype"] == daytype
+        for r in _live_grid_overrides(recs))
+
+
+def apply_grid_overrides() -> int:
+    """살아 있는 오버라이드를 DATA 에 주입한다.
+
+    **스냅샷 재적재 직후에만** 부른다(lifespan · /refresh 의 DATA.update 뒤) —
+    이때 셀은 산출물 원값이라, 재계산으로 원값이 바뀌었으면 prev 를 그 값으로
+    따라잡아 두어야 나중의 되돌리기가 낡은 원값을 되살리지 않는다.
+    저장/취소 엔드포인트는 이 함수를 쓰지 않고 제자리 수정을 한다 — 이미
+    오버라이드가 적용된 셀 위에서 이 함수를 다시 돌리면 prev 따라잡기가
+    오버라이드된 값을 원값으로 착각한다.
+    """
+    recs = _read_grid_overrides()
+    live = _live_grid_overrides(recs)
+    if not live:
+        return 0
+    touched, dirty, applied = set(), False, 0
+    for r in live:
+        payload = _grid_payload(r["period"], r["daytype"])
+        if payload is None:                       # _we 산출물이 없는 배포본
+            continue
+        cell = _find_cell(payload, r["gridId"])
+        if cell is None:                          # 격자 개편으로 사라진 칸
+            continue
+        cur = cell.get(r["field"])
+        if cur != r["value"]:
+            if r.get("prev") != cur:
+                r["prev"] = cur
+                dirty = True
+            _set_cell_field(cell, r["field"], r["value"])
+            applied += 1
+        cell["overridden"] = True
+        touched.add((r["period"], r["daytype"]))
+    for period, daytype in touched:
+        _recount_kpi(_grid_payload(period, daytype))
+    if dirty:
+        _write_grid_overrides(recs)
+    return applied
+
+
 # ─── 인증 ──────────────────────────────────────────────────────────────────────
 _AUTH = {"fail": 0, "locked_until": 0.0, "logged": 0}
 
@@ -759,6 +891,7 @@ async def _reload_data() -> dict:
         new = await asyncio.to_thread(_ctx["build_snapshot"])   # 기준선 assert 포함 ~5초
         _ctx["DATA"].update(new)                                 # lifespan 과 같은 교체 방식
         apply_runtime_params()                                   # 새 sim 모듈에 오버라이드 재주입!
+        apply_grid_overrides()                                   # 새 셀(원값)에 격자 오버라이드 재주입
     kpi = new.get("grid_am", {}).get("kpi", {})
     return {"updatedAt": new.get("meta", {}).get("updatedAt"),
             "cells": len(new.get("cells", {}).get("am", {})),
@@ -987,7 +1120,7 @@ def _param_rows() -> list:
             pending = ov is not None and eff != ov["value"]
         rows.append({
             "key": key, "label": s["label"], "unit": s["unit"], "type": s["type"],
-            "min": s["min"], "max": s["max"], "scope": s["scope"], "group": s["group"],
+            "min": s.get("min"), "max": s.get("max"), "scope": s["scope"], "group": s["group"],
             "editable": editable, "requiresRefresh": s["scope"] == "pipeline",
             "default": s["default"],
             "override": ov["value"] if ov else None,
@@ -1052,17 +1185,21 @@ def save_params(req: SaveRequest, _w=Depends(require_write)):
             normalized[k] = None
             continue
         s = SPECS[k]
+        # 유한성 검사가 형 검사보다 먼저다 — Python json 은 Infinity/NaN 을
+        # 받아들이는데, 그대로 저장되면 응답 직렬화(_json 의 allow_nan=False)가
+        # 죽어 /meta 를 포함한 전 API 가 500 이 된다. int(inf) 도 OverflowError.
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise HTTPException(400, f"{k} 는 유한한 숫자여야 합니다 (받은 값: {v!r})")
         if s["type"] == "int":
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v:
+            if int(v) != v:
                 raise HTTPException(400, f"{k} 는 정수여야 합니다 (받은 값: {v!r})")
             v = int(v)
         else:
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                raise HTTPException(400, f"{k} 는 숫자여야 합니다 (받은 값: {v!r})")
             v = float(v)
-        if not (s["min"] <= v <= s["max"]):
-            raise HTTPException(
-                400, f"{k} 는 {s['min']:,}~{s['max']:,} 사이여야 합니다 (받은 값: {v:,})")
+        # 범위 제한은 두지 않는다(SPECS 상단 주석). 단 비용 0/음수는 추천의
+        # 비용효율(ΔB̂/비용) 나눗셈에서 ZeroDivisionError 로 이어지므로 막는다.
+        if k.startswith("cost.") and k.endswith(".krw") and v <= 0:
+            raise HTTPException(400, f"{k} 는 0보다 커야 합니다 — 추천 순위가 비용으로 나눕니다 (받은 값: {v:,})")
         normalized[k] = v
 
     with SAVE_LOCK:
@@ -1094,6 +1231,125 @@ def _save_locked(req: "SaveRequest", normalized: dict, reason: str):
     needs = sorted({a["key"] for a in applied if SPECS[a["key"]]["scope"] == "pipeline"})
     return {"ok": True, "applied": applied, "overrideCount": len(current),
             "requiresRefresh": needs, "params": _param_rows()}
+
+
+class GridOverrideRequest(BaseModel):
+    gridId: str
+    period: str
+    daytype: str = "wd"
+    field: str
+    value: object = None
+    reason: str = ""
+    actor: str = "admin"
+
+
+class GridOverrideRevokeRequest(BaseModel):
+    id: str
+    reason: str = ""
+    actor: str = "admin"
+
+
+@router.get("/grid-overrides")
+def list_grid_overrides(can_write: bool = Depends(require_read)):
+    recs = _read_grid_overrides()
+    return {"overrides": list(reversed(recs)),      # 최신이 위
+            "liveCount": len(_live_grid_overrides(recs)),
+            "fields": {k: dict(kind=v["kind"], allowed=list(v.get("allowed", [])))
+                       for k, v in GRID_FIELDS.items()},
+            "canWrite": can_write}
+
+
+@router.post("/grid-overrides")
+def save_grid_override(req: GridOverrideRequest, _w=Depends(require_write)):
+    reason = (req.reason or "").strip()
+    if len(reason) < 5:
+        raise HTTPException(400, "reason 은 5자 이상이어야 합니다 — 왜 모델 값을 사람이 "
+                                 "고쳤는지는 심사에서 반드시 나오는 질문입니다.")
+    if req.field not in GRID_FIELDS:
+        raise HTTPException(400, f"field 는 {list(GRID_FIELDS)} 중 하나여야 합니다 "
+                                 f"(받은 값: {req.field!r}). mi·demand·supply 는 색 bin· "
+                                 "산점도와 얽혀 1단계에서 열지 않았습니다.")
+    if req.period not in (_ctx["PERIODS"] or []):
+        raise HTTPException(400, f"period 는 {_ctx['PERIODS']} 중 하나여야 합니다.")
+    if req.daytype not in ("wd", "we"):
+        raise HTTPException(400, "daytype 은 wd 또는 we 여야 합니다.")
+    payload = _grid_payload(req.period, req.daytype)
+    if payload is None:
+        raise HTTPException(404, f"grid_{req.period}{'_we' if req.daytype == 'we' else ''} "
+                                 "데이터가 없습니다.")
+    cell = _find_cell(payload, req.gridId)
+    if cell is None:
+        raise HTTPException(400, f"gridId 를 찾을 수 없습니다: {req.gridId!r}")
+
+    spec = GRID_FIELDS[req.field]
+    v = req.value
+    if spec["kind"] == "text":
+        if v not in spec["allowed"]:
+            raise HTTPException(400, f"{req.field} 값은 {list(spec['allowed'])} 중 하나여야 "
+                                     f"합니다 (받은 값: {v!r})")
+    else:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise HTTPException(400, f"{req.field} 값은 유한한 숫자여야 합니다 (받은 값: {v!r})")
+        v = float(v)
+        if v < 0:
+            raise HTTPException(400, f"{req.field} 값은 0 이상이어야 합니다 — 음수 점수는 "
+                                     "정렬을 뒤집는 게 아니라 뜻이 없습니다.")
+
+    with SAVE_LOCK:
+        recs = _read_grid_overrides()
+        # 같은 (격자·시간대·요일·필드)에 살아 있는 오버라이드는 하나뿐이어야 한다
+        # (schema_ops.sql 의 유니크 인덱스와 같은 규칙). 새 저장은 옛것을 자동
+        # 취소하고 **옛것의 prev(진짜 원값)** 를 물려받는다 — 지금 셀 값은 이미
+        # 오버라이드된 값이라 그걸 prev 로 삼으면 되돌리기가 원값으로 못 돌아간다.
+        old = next((r for r in _live_grid_overrides(recs)
+                    if r["gridId"] == req.gridId and r["period"] == req.period
+                    and r["daytype"] == req.daytype and r["field"] == req.field), None)
+        prev = old["prev"] if old else cell.get(req.field)
+        if old:
+            old["revokedAt"] = _now()
+            old["revokeReason"] = "새 값으로 교체"
+        rec = {"id": f"g-{secrets.token_urlsafe(6)}", "gridId": req.gridId,
+               "period": req.period, "daytype": req.daytype, "field": req.field,
+               "value": v, "prev": prev, "reason": reason, "actor": req.actor,
+               "at": _now(), "revokedAt": None, "revokeReason": None}
+        recs.append(rec)
+        _append_history({"kind": "grid.set", "actor": req.actor, "reason": reason,
+                         "changes": [{"key": f"{req.gridId}·{req.period}·{req.daytype}·{req.field}",
+                                      "old": prev, "new": v}]})
+        _write_grid_overrides(recs)
+        _set_cell_field(cell, req.field, v)
+        cell["overridden"] = True
+        _recount_kpi(payload)
+    return {"ok": True, "override": rec, "kpi": payload["kpi"]}
+
+
+@router.post("/grid-overrides/revoke")
+def revoke_grid_override(req: GridOverrideRevokeRequest, _w=Depends(require_write)):
+    with SAVE_LOCK:
+        recs = _read_grid_overrides()
+        rec = next((r for r in recs if r["id"] == req.id), None)
+        if rec is None:
+            raise HTTPException(404, f"오버라이드를 찾을 수 없습니다: {req.id!r}")
+        if rec.get("revokedAt"):
+            raise HTTPException(400, "이미 취소된 오버라이드입니다.")
+        rec["revokedAt"] = _now()
+        rec["revokeReason"] = (req.reason or "").strip() or "관리자 취소"
+        payload = _grid_payload(rec["period"], rec["daytype"])
+        cell = _find_cell(payload, rec["gridId"]) if payload else None
+        if cell is not None:
+            # 현재 값이 오버라이드 값일 때만 원값을 되살린다 — 그사이 재계산으로
+            # 셀이 새로 태어났다면(값이 이미 다르면) 덮어쓸 이유가 없다.
+            if cell.get(rec["field"]) == rec["value"]:
+                _set_cell_field(cell, rec["field"], rec["prev"])
+            _refresh_cell_override_flag(cell, recs, rec["period"], rec["daytype"])
+            _recount_kpi(payload)
+        _append_history({"kind": "grid.revoke", "actor": req.actor,
+                         "reason": rec["revokeReason"],
+                         "changes": [{"key": f"{rec['gridId']}·{rec['period']}·{rec['daytype']}·{rec['field']}",
+                                      "old": rec["value"], "new": rec["prev"]}]})
+        _write_grid_overrides(recs)
+    return {"ok": True, "override": rec,
+            "kpi": payload["kpi"] if payload else None}
 
 
 class RefreshRequest(BaseModel):

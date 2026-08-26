@@ -23,6 +23,8 @@
 | 8 | `/api/v1/recommendations` | POST | AI 추천 배치안 ★ |
 | 9 | `/api/v1/reports/draft` | POST | 보고서 초안 생성 (AI 프록시) |
 | 10 | `/api/v1/providers` | GET | AI 프로바이더·모델 목록 |
+| 11 | `/api/v1/scenarios` | POST | 시나리오 공유 저장 (공유 링크의 실체) |
+| 12 | `/api/v1/scenarios/{id}` | GET | 공유 시나리오 조회 |
 
 ---
 
@@ -536,8 +538,11 @@ REST 외에 정적 마운트가 둘 있습니다.
 - 존재하지 않는 격자 ID나 없는 읍면동 이름도 400 이 아니라 같은 방식으로 0건입니다
   (해석 불가한 범위 = 빈 결과). 사용자가 "짓겠다"고 지정한 `placements[]` 는 반대로
   알 수 없는 `cellId` 에 400 을 던집니다 — 의도가 다르기 때문입니다.
-- 범위가 지정되면 `balance`(지역 균형)는 `efficiency` 로 대체됩니다. 응답의
-  `strategy` 필드로 확인하세요.
+- **`region`(읍면동 하나) 범위에서만** `balance`(지역 균형)가 `efficiency` 로
+  대체됩니다 — 동별 1건 상한이 곧 1건 추천이라 성립하지 않기 때문입니다. 이때
+  `strategies` 목록·`alternatives` 에서도 함께 빠집니다. 응답의 `strategy` 필드로
+  확인하세요. **`cellIds`(지도 영역)에서는 대체되지 않습니다** — 영역은 여러
+  읍면동에 걸칠 수 있어 "영역 안에서 동별 1개씩"이 뜻 있는 전략입니다.
 
 #### 추천 전략
 
@@ -791,6 +796,49 @@ REST 외에 정적 마운트가 둘 있습니다.
 - `configuredDefault`: `provider: "auto"` 가 실제로 어디로 가는지 (`_detect_provider` 결과).
   키가 하나도 없으면 `null` 이고 이때 `/reports/draft` 는 규칙 기반 초안으로 폴백합니다.
   드롭다운에서 "자동" 옆에 실제 대상을 표시할 때 쓰세요.
+
+---
+
+## 11. `POST /api/v1/scenarios` · 12. `GET /api/v1/scenarios/{id}`
+
+시뮬레이션 배치안의 **공유 링크의 실체**입니다. 프론트의 [공유 링크] 버튼이 현재
+배치·예산·시간대를 저장하고, 받은 `id` 를 `simulation.html?scenario={id}` 로 조립해
+클립보드에 복사합니다. 링크를 연 브라우저는 부트 때 `GET /api/v1/scenarios/{id}` 로
+같은 배치안을 복원합니다. 로컬 저장(`hw.scenarios`, localStorage)과 별개 경로입니다 —
+로컬 저장은 그 브라우저에만 남습니다.
+
+저장소는 서버의 `var/scenarios/` 파일입니다(DB 불필요 — `schema_ops.sql` 의
+`scenario` 테이블은 DB 확장용으로 남아 있습니다). 쓰기는 `/simulations` 와 같은
+신뢰 모델(공개)이고, 입력도 같은 검증(`_validate_placements`)을 지납니다.
+
+### 요청 (POST)
+
+```json
+{
+  "name": "향남·우정 우선 배치안",
+  "period": "am",
+  "budgetKrw": 3000000000,
+  "placements": [{ "type": "drt", "cellId": "다사6707", "count": 1 }]
+}
+```
+
+| 필드 | 타입 | 기본 | 규칙 |
+|---|---|---|---|
+| `name` | string | `""` | 80자 절단 · 제어문자 제거 (표시는 프론트가 이스케이프) |
+| `period` | string | `am` | 없는 시간대는 **400** |
+| `budgetKrw` | int\|null | 관리자 기본 예산 | 음수는 **400** |
+| `placements` | array | — | `/simulations` §7 과 같은 검증 — 빈 배열은 **400** (빈 시나리오는 공유 불가) |
+
+### 응답
+
+```json
+{ "ok": true, "id": "Ab3xK9q2LmZw", "path": "/api/v1/scenarios/Ab3xK9q2LmZw", "scenario": { "...": "저장된 원문" } }
+```
+
+- `GET /api/v1/scenarios/{id}` — 저장된 원문 그대로. 형식 위반 id 는 **400**,
+  없는 id 는 **404** (링크가 잘못됐거나 서버에서 정리된 경우).
+- 오래된 시나리오를 조용히 지우지 않습니다 — 공유해 둔 링크가 죽으면 안 되므로,
+  상한(2,000건)에 닿으면 새 저장이 **409** 로 거절되고 운영자가 정리합니다.
 
 ---
 

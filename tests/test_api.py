@@ -802,23 +802,36 @@ def test_upload_client_steps_are_ignored(c, adm):
 # J. 계약 정합 회귀 — 2026-08-26 프론트-백엔드 계약 불일치 수정분
 # ══════════════════════════════════════════════════════════════
 
-def test_recommendation_cellids_balance_swap_is_consistent(c):
-    """지도 영역(cellIds) + balance — 치환이 응답 전체에서 한목소리인가.
+def test_recommendation_balance_scope_rules(c):
+    """balance 치환은 읍면동(region) 범위에서만 — 지도 영역(cellIds)은 여러 동에
+    걸칠 수 있어 지역 균형(동별 1건 상한)이 유효하다.
 
-    치환 자체는 계약이다(API_SPEC §8 — 범위가 지정되면 balance 는 efficiency 로
-    대체). 예전에는 region 만 보고 판정해서 cellIds 로 제한하면
-    ① strategies 목록에 balance 가 남아 고르면 조용히 efficiency 결과가 오고
-    ② simulation.name 은 치환 전 라벨("지역 균형 추천안")로 나갔고
-    ③ alternatives 에도 balance 가 다시 끼었다."""
+    두 번 고쳐진 자리다: 처음에는 region 만 보고 치환해 cellIds 에서 이름·목록이
+    어긋났고, 다음에는 cellIds 까지 묶어 치환해 **영역을 지정하면 지역 균형을
+    고를 수 없는 버그**가 됐다. 치환·목록 제외·이름은 항상 한목소리여야 하고,
+    치환 자체는 단일 읍면동 범위에만 성립한다(동별 1건 상한 = 곧 1건 추천)."""
+    # ① 지도 영역(cellIds) — balance 가 그대로 살아 동별 1건 상한으로 돈다
     ids = [x["cellId"] for x in
-           c.get("/api/v1/priorities?period=am&limit=5").json()["items"]]
+           c.get("/api/v1/priorities?period=am&limit=10").json()["items"]]
     j = c.post("/api/v1/recommendations",
                json={"period": "am", "strategy": "balance", "budgetKrw": BUDGET,
                      "cellIds": ids, "includeAlternatives": True}).json()
-    assert j["strategy"] == "efficiency"
+    assert j["strategy"] == "balance"
     assert j["simulation"]["name"] == j["strategyLabel"] + " 추천안"
-    assert "balance" not in [s["id"] for s in j["strategies"]]
-    assert "balance" not in [a["strategy"] for a in j["alternatives"]]
+    assert "balance" in [s["id"] for s in j["strategies"]]
+    assert j["placements"], "영역 안 need/drt 후보인데 배치가 0건이다"
+    regions = [p["region"] for p in j["placements"]]
+    assert len(regions) == len(set(regions)), "지역 균형인데 같은 읍면동에 두 건이 놓였다"
+    # ② 읍면동(region) — 성립하지 않아 efficiency 로 치환되고 목록·대안에서도 빠진다
+    region = next(x["region"] for x in
+                  c.get("/api/v1/grid?period=am").json()["cells"] if x["quadrant"] == "need")
+    j2 = c.post("/api/v1/recommendations",
+                json={"period": "am", "strategy": "balance", "budgetKrw": BUDGET,
+                      "region": region, "includeAlternatives": True}).json()
+    assert j2["strategy"] == "efficiency"
+    assert j2["simulation"]["name"] == j2["strategyLabel"] + " 추천안"
+    assert "balance" not in [s["id"] for s in j2["strategies"]]
+    assert "balance" not in [a["strategy"] for a in j2["alternatives"]]
 
 
 def test_chat_daytype_is_validated(c):
@@ -862,3 +875,113 @@ def test_meta_cost_compare_single_source(c):
     assert j["summary"]["costCompareBasis"] == meta["costCompare"]["basis"]
     assert j["summary"]["costCompareLabel"] == meta["costCompare"]["label"]
     assert j["summary"]["costCompareNote"] == meta["costCompare"]["note"]
+
+
+def test_admin_params_no_range_limits(c, monkeypatch, tmp_path):
+    """파라미터 범위(min/max) 제거(2026-08-26) — 예전 범위 밖 값이 저장되고,
+    서버를 실제로 죽이는 값 둘만 400 으로 남는다: 비유한수(Infinity/NaN 은
+    응답 직렬화 allow_nan=False 를 죽인다) · 비용 ≤ 0 (추천이 비용으로 나눈다)."""
+    from server import admin
+    d = tmp_path / "admin"
+    d.mkdir()
+    monkeypatch.setattr(admin, "ADMIN_DIR", d)
+    monkeypatch.setattr(admin, "OVERRIDE_PATH", d / "params_override.json")
+    monkeypatch.setattr(admin, "HISTORY_PATH", d / "history.jsonl")
+    try:
+        r = c.post("/api/v1/admin/params", json={
+            "reason": "범위 제거 검증", "actor": "test",
+            "changes": {"sim.headwayMult": 5.0,                      # 옛 max 2.0 밖
+                        "cost.defaultBudget": 5_000_000_000_000}})   # 옛 max 1조 밖
+        assert r.status_code == 200, r.text
+        rows = {p["key"]: p for p in c.get("/api/v1/admin/params").json()["params"]}
+        assert rows["sim.headwayMult"]["min"] is None and rows["sim.headwayMult"]["max"] is None
+        assert rows["sim.headwayMult"]["effective"] == 5.0
+        assert c.post("/api/v1/admin/params", json={
+            "reason": "비용 0 가드", "actor": "test",
+            "changes": {"cost.stop.krw": 0}}).status_code == 400
+        # httpx 는 inf 를 직렬화하지 않으므로 원문으로 보낸다 — Python json 파서는
+        # `Infinity` 리터럴을 받아들여서 이 경로가 실제로 존재하는 공격면이다.
+        r_inf = c.post("/api/v1/admin/params",
+                       content=b'{"reason": "\ube44\uc720\ud55c\uc218 \uac00\ub4dc", "actor": "test",'
+                               b' "changes": {"sim.phi.am": Infinity}}',
+                       headers={"Content-Type": "application/json"})
+        assert r_inf.status_code == 400, r_inf.text
+    finally:
+        # 메모리에 적용된 오버라이드를 기본값으로 되돌린다 — 오버라이드 파일(tmp)을
+        # 지운 뒤 재적용하면 COST_KRW·sim 속성·meta 사본이 전부 기본값으로 돌아와
+        # 세션 스코프 TestClient 를 공유하는 다른 테스트가 오염되지 않는다.
+        if admin.OVERRIDE_PATH.exists():
+            admin.OVERRIDE_PATH.unlink()
+        admin.apply_runtime_params()
+
+
+def test_scenario_share_roundtrip(c, monkeypatch, tmp_path):
+    """시나리오 공유 — 저장한 것을 링크(id)로 그대로 되찾는가, 쓰레기 입력은 막히는가."""
+    import server.main as m
+    monkeypatch.setattr(m, "SCEN_DIR", tmp_path / "scenarios")
+    cell = c.get("/api/v1/priorities?period=am&limit=1").json()["items"][0]["cellId"]
+    r = c.post("/api/v1/scenarios", json={
+        "name": "공유 검증\x07시나리오", "period": "am", "budgetKrw": 1_000_000_000,
+        "placements": [{"type": "drt", "cellId": cell, "count": 2}]})
+    assert r.status_code == 200, r.text
+    sid = r.json()["id"]
+    got = c.get(f"/api/v1/scenarios/{sid}").json()
+    assert got["name"] == "공유 검증시나리오"          # 제어문자는 걷어낸다
+    assert got["period"] == "am" and got["budgetKrw"] == 1_000_000_000
+    assert got["placements"] == [{"type": "drt", "cellId": cell, "count": 2}]
+    # 빈 시나리오·형식 위반 id·없는 id 는 각각 400/400/404
+    assert c.post("/api/v1/scenarios", json={"placements": []}).status_code == 400
+    assert c.get("/api/v1/scenarios/x").status_code == 400
+    assert c.get("/api/v1/scenarios/aaaaaaaaaaaa").status_code == 404
+    # 배치 검증은 /simulations 와 같은 자 — 없는 격자는 400
+    assert c.post("/api/v1/scenarios", json={
+        "placements": [{"type": "stop", "cellId": "없는격자", "count": 1}]}).status_code == 400
+
+
+def test_grid_override_wiring(c, monkeypatch, tmp_path):
+    """관리자 격자 오버라이드 — 저장 즉시 /grid 셀·라벨·KPI 에 반영되고(셀에서
+    재집계 — "지도만 붉어지고 KPI 는 그대로" 사고 방지), 되돌리면 원값 복원."""
+    from server import admin
+    d = tmp_path / "admin"
+    d.mkdir()
+    monkeypatch.setattr(admin, "ADMIN_DIR", d)
+    monkeypatch.setattr(admin, "GRID_OVERRIDE_PATH", d / "grid_override.json")
+    monkeypatch.setattr(admin, "HISTORY_PATH", d / "history.jsonl")
+    grid = c.get("/api/v1/grid?period=am").json()
+    kpi0 = grid["kpi"]["needCells"]
+    gid = next(x["id"] for x in grid["cells"] if x["quadrant"] == "mid")
+    rec_id = None
+    try:
+        r = c.post("/api/v1/admin/grid-overrides", json={
+            "gridId": gid, "period": "am", "daytype": "wd",
+            "field": "quadrant", "value": "need", "reason": "현장 실사 검증용 테스트"})
+        assert r.status_code == 200, r.text
+        rec_id = r.json()["override"]["id"]
+        assert r.json()["override"]["prev"] == "mid"
+        g2 = c.get("/api/v1/grid?period=am").json()
+        c2 = next(x for x in g2["cells"] if x["id"] == gid)
+        assert c2["quadrant"] == "need" and c2["overridden"] is True
+        assert c2["quadrantLabel"] == "고수요·저공급"      # 라벨을 빼먹으면 값과 라벨이 다른 말을 한다
+        assert g2["kpi"]["needCells"] == kpi0 + 1
+        # 입력 검증 — 1단계에서 안 연 필드(mi)·짧은 사유·없는 격자·틀린 값
+        assert c.post("/api/v1/admin/grid-overrides", json={
+            "gridId": gid, "period": "am", "field": "mi", "value": 1.0,
+            "reason": "다섯자넘는사유"}).status_code == 400
+        assert c.post("/api/v1/admin/grid-overrides", json={
+            "gridId": gid, "period": "am", "field": "quadrant", "value": "need",
+            "reason": "짧다"}).status_code == 400
+        assert c.post("/api/v1/admin/grid-overrides", json={
+            "gridId": "없는격자", "period": "am", "field": "quadrant", "value": "need",
+            "reason": "다섯자넘는사유"}).status_code == 400
+        assert c.post("/api/v1/admin/grid-overrides", json={
+            "gridId": gid, "period": "am", "field": "quadrant", "value": "빨강",
+            "reason": "다섯자넘는사유"}).status_code == 400
+    finally:
+        if rec_id:
+            rr = c.post("/api/v1/admin/grid-overrides/revoke",
+                        json={"id": rec_id, "reason": "테스트 정리"})
+            assert rr.status_code == 200, rr.text
+    g3 = c.get("/api/v1/grid?period=am").json()
+    c3 = next(x for x in g3["cells"] if x["id"] == gid)
+    assert c3["quadrant"] == "mid" and c3["overridden"] is False
+    assert g3["kpi"]["needCells"] == kpi0
