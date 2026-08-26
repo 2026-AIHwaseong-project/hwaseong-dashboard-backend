@@ -1048,3 +1048,35 @@ def test_pipeline_params_unlocked_and_boot_safe(c, monkeypatch, tmp_path):
         if admin.OVERRIDE_PATH.exists():
             admin.OVERRIDE_PATH.unlink()
         admin.apply_runtime_params()
+
+
+def test_premium_model_gate(c, monkeypatch):
+    """익명 사용자의 프리미엄 모델 지정 차단(심층 분석 [높음] — 비용 증폭 벡터).
+    ADMIN_TOKEN 이 설정된 서버에서만 게이트가 선다 — 토큰이 아예 없으면 콘솔
+    전체가 열려 있는 상태라 이 게이트만 잠그는 것은 뜻이 없다."""
+    monkeypatch.setenv("ADMIN_TOKEN", "gate-test-token")
+    body = {"provider": "claude", "model": "claude-opus-5",
+            "messages": [{"role": "user", "content": "hi"}]}
+    # 무토큰 + 프리미엄 명시 → 403
+    assert c.post("/api/v1/chat", json=body).status_code == 403
+    assert c.post("/api/v1/reports/draft",
+                  json={"provider": "claude", "model": "claude-opus-5",
+                        "period": "am"}).status_code == 403
+    # 올바른 토큰이면 통과 (키가 없어도 403 이 아니라 폴백 200)
+    r = c.post("/api/v1/chat", json=body,
+               headers={"Authorization": "Bearer gate-test-token"})
+    assert r.status_code == 200
+    # 모델 미지정·기본 모델은 무토큰 그대로 — auto 와 같아 비용 증폭이 아니다
+    assert c.post("/api/v1/chat", json={
+        "provider": "claude", "messages": [{"role": "user", "content": "hi"}]
+    }).status_code == 200
+    assert c.post("/api/v1/chat", json={
+        "provider": "claude", "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "hi"}]}).status_code == 200
+    # 저가(fast) 모델 지정은 막지 않는다
+    assert c.post("/api/v1/chat", json={
+        "provider": "claude", "model": "claude-haiku-4-5-20251001",
+        "messages": [{"role": "user", "content": "hi"}]}).status_code == 200
+    # ADMIN_TOKEN 미설정이면 게이트도 열린다
+    monkeypatch.delenv("ADMIN_TOKEN")
+    assert c.post("/api/v1/chat", json=body).status_code == 200

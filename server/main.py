@@ -20,6 +20,7 @@
       analysis/05_simulate.py (importlib 로 로드 — 파일명 숫자 시작)
       server/db.py — DATABASE_URL 이 있으면 여기서 대신 읽습니다(없으면 JSON)
 """
+import hmac
 import importlib.util
 import json
 import asyncio
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -1371,7 +1372,25 @@ def _default_model(provider: str) -> str:
     return _PROVIDERS[provider]["default_model"]
 
 
-def _resolve_model(provider: str, requested: Optional[str]) -> str:
+def _is_admin_request(authorization: str) -> bool:
+    """AI 프리미엄 모델 게이트용 관리자 판정. ADMIN_TOKEN 이 아예 없으면 True —
+    관리자 콘솔 전체가 열려 있는 상태에서 이 게이트만 잠그는 것은 뜻이 없고,
+    로컬 개발이 매번 토큰을 요구받게 된다(server/admin.py 의 fail-open 철학과 동일)."""
+    token = os.environ.get("ADMIN_TOKEN", "")
+    if not token:
+        return True
+    given = authorization[7:].strip() if authorization.startswith("Bearer ") else authorization.strip()
+    return bool(given) and hmac.compare_digest(given, token)
+
+
+def _model_tier(provider: str, model_id: str) -> Optional[str]:
+    for m in _PROVIDERS[provider]["models"]:
+        if m["id"] == model_id:
+            return m.get("tier")
+    return None
+
+
+def _resolve_model(provider: str, requested: Optional[str], is_admin: bool = True) -> str:
     """요청 모델을 **허용목록과 대조한 뒤** 돌려준다.
 
     /providers 가 이미 프로바이더별 모델 목록을 내려주는데 정작 요청 검증에는
@@ -1390,6 +1409,17 @@ def _resolve_model(provider: str, requested: Optional[str]) -> str:
         raise HTTPException(
             400, f"{provider} 에서 쓸 수 있는 모델이 아닙니다: {requested!r} "
                  f"(가능: {sorted(allowed)})")
+    # 비용 게이트 — **명시 요청된** 프리미엄 모델은 관리자 토큰이 있어야 한다.
+    # 무인증·무레이트리밋 엔드포인트에서 익명 사용자가 가장 비싼 모델을 고를 수
+    # 있던 것이 심층 분석의 [높음] 항목이었다. 기본 모델(requested 미지정 또는
+    # 기본과 동일)은 그대로 연다 — auto 가 주는 것과 같아 비용 증폭이 아니다.
+    # openai·gemini 는 기본 모델 자체가 premium 이라 "tier 로 일괄 차단"이 아니라
+    # "기본에서 벗어난 프리미엄 지정"만 막는 것이 맞다.
+    if (not is_admin and requested != _default_model(provider)
+            and _model_tier(provider, requested) == "premium"):
+        raise HTTPException(
+            403, f"프리미엄 모델({requested})은 관리자 토큰(Bearer)이 필요합니다 — "
+                 "모델을 지정하지 않으면 기본 모델로 동작합니다.")
     return requested
 
 
@@ -1835,7 +1865,7 @@ class ReportRequest(BaseModel):
 
 
 @app.post("/api/v1/reports/draft")
-async def draft_report(req: ReportRequest):
+async def draft_report(req: ReportRequest, authorization: str = Header(default="")):
     _chk_period(req.period)
 
     provider = _detect_provider() if req.provider == "auto" else req.provider
@@ -1869,7 +1899,7 @@ async def draft_report(req: ReportRequest):
     # 500 을 던지면 화면의 「AI 보고서 생성」 버튼이 그냥 깨진다.
     if provider is None:
         return _fallback_report(req.period, kpi, priorities, daytype)
-    model = _resolve_model(provider, req.model)
+    model = _resolve_model(provider, req.model, _is_admin_request(authorization))
     sim_ctx      = req.context.get("simulation")
     rec_ctx      = req.context.get("recommendation")
 
@@ -2375,7 +2405,7 @@ async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: st
 
 
 @app.post("/api/v1/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, authorization: str = Header(default="")):
     _chk_period(req.period)
     _chk_daytype(req.daytype)
     if req.mode not in ("help", "report"):
@@ -2399,7 +2429,7 @@ async def chat(req: ChatRequest):
         return _sse_response(_sse_once(nokey)) if req.stream else nokey
     if provider not in _PROVIDERS:
         raise HTTPException(400, f"provider는 {list(_PROVIDERS)} 중 하나여야 합니다.")
-    model = _resolve_model(provider, req.model)
+    model = _resolve_model(provider, req.model, _is_admin_request(authorization))
 
     kb = CHAT_KB_PATH.read_text("utf-8") if CHAT_KB_PATH.exists() else ""
     rules = _CHAT_REPORT_RULES if req.mode == "report" else _CHAT_RULES
