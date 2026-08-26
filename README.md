@@ -159,6 +159,19 @@ python main.py
 DB 를 끄고 원래대로 돌아가려면 `DATABASE_URL` 을 지우고 서버를 다시 띄우면 됩니다.
 컨테이너는 `docker compose --profile db stop db` 로 세웁니다.
 
+> ⚠️ **DB 를 켠 뒤에는 compose 명령에 `--profile db` 를 항상 붙이세요.**
+> `db` 는 `profiles: ["db"]` 라 프로필 없이 `docker compose up -d api` 를 돌리면
+> 프로필 밖 서비스로 취급돼 **db 가 함께 내려갑니다.** 그러면 api 는 설계대로
+> JSON 으로 폴백하고(화면은 그대로 살아 있음) `/api/v1/admin/status` 의
+> `source` 만 조용히 `json` 으로 바뀝니다 — 2026-08-27 운영 점검에서 실제로
+> 이렇게 폴백해 있던 것을 발견했습니다.
+>
+> ```bash
+> docker compose --profile db up -d --force-recreate api   # ← 이렇게
+> docker compose --profile db ps                           # api·caddy·db 셋 다 Up 인지
+> ```
+> 확인은 기동 로그 한 줄로 갈립니다(§1 「켜졌는지 확인하는 법」).
+
 ### API 키가 필요한 경우
 
 평소에는 필요 없습니다. 두 경우에만 씁니다.
