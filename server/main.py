@@ -73,7 +73,7 @@ TYPE_LABEL = {"stop": "정류장 신설", "drt": "똑버스 배치", "freq": "�
 COST_KRW = dict(admin.PARAMS.COST_TOTAL)
 RADIUS_KM = {t: admin.PARAMS.radius_km(t) for t in ("stop", "drt", "freq")}
 STRAT_META = {
-    "efficiency": {"label": "효율 최우선", "note": "사업비 1원당 해소 통행량이 가장 큰 순서로 고릅니다."},
+    "efficiency": {"label": "효율 최우선", "note": "사업비 1원당 예측 승차 증가량이 가장 큰 순서로 고릅니다."},
     "equity":     {"label": "교통약자 우선", "note": "고령 잠재통행량 기준으로 개선 효과를 측정합니다."},
     "balance":    {"label": "지역 균형", "note": "읍면동당 최대 1개를 원칙으로 고릅니다."},
     "quick":      {"label": "즉시 착수", "note": "시설비 없이 정류장 신설만 선택합니다."},
@@ -1130,8 +1130,8 @@ def run_recommendations(req: RecRequest):
     result = {
         "method": "budget-constrained greedy marginal benefit",
         "methodLabel": "예산 제약 하 한계효과 최대화",
-        "methodNote": f"{PERIOD_NAME[req.period]} 시간대 기준으로, 미해결 통행량을 "
-                      "사업비 1원당 가장 많이 줄이는 지점을 순차 선택합니다. "
+        "methodNote": f"{PERIOD_NAME[req.period]} 시간대의 버스 부족 지역을 우선하되, "
+                      "사업비 1원당 예측 승차 증가량이 가장 큰 지점을 순차 선택합니다. "
                       "수단은 정류장 접근성(coverage)으로 배타 결정되며, "
                       "배치 효과는 4개 시간대 전부에 반영해 보고합니다."
                       + ("" if weekend_impact is None else
