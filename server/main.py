@@ -1916,6 +1916,9 @@ async def draft_report(req: ReportRequest, authorization: str = Header(default="
 
 분석 기준: {daytype_name} · {period_name} ({period_hours})
 
+분석 단위: {DATA['meta']['grid']['sizeMeters']}m × {DATA['meta']['grid']['sizeMeters']}m 격자 (화성시 전역 {DATA['meta']['grid']['cellCount']}칸)
+사업비 단가: 정류장 신설 {COST_KRW['stop']:,}원(1회성) · 똑버스 {COST_KRW['drt']:,}원/년 · 배차 증편 {COST_KRW['freq']:,}원/년
+
 현황 데이터:
 - 고수요·저공급(need) 격자: {kpi.get('needCells', '미제공')}개 / 전체 {kpi.get('totalCells', DATA['meta']['grid']['cellCount'])}개
 - needShare: {kpi.get('needShare', '미제공')}%
@@ -1929,6 +1932,9 @@ async def draft_report(req: ReportRequest, authorization: str = Header(default="
 {weekend_note}
 
 **위에 주어진 수치만 사용하십시오. 제공된 데이터에 없는 수치는 어떤 경우에도 쓰지 마십시오.**
+특히 **격자 크기와 사업비 단가는 위에 적힌 값을 그대로** 쓰십시오 — 실제로 격자를
+'500m×500m'로, 단가 1.8억 원을 '18억 원'으로 지어낸 사례가 있었습니다. 금액은
+위 단가와 배치 건수의 곱으로만 계산하고, 단위(억/만)를 임의로 바꾸지 마십시오.
 모든 주장에는 위 데이터의 수치 근거를 붙이고, 추정값에는 '추정'·'~로 산정되었다'처럼 불확실성을 드러내십시오.
 
 다음 섹션을 key 그대로 포함하여 JSON으로 보고서를 작성하세요 (sections: {json.dumps(req.sections, ensure_ascii=False)}):
