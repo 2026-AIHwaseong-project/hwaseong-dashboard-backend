@@ -796,3 +796,69 @@ def test_upload_client_steps_are_ignored(c, adm):
                json={"uploadId": uid, "steps": ["load"], "reason": "x"})
     assert r.status_code == 200, r.text
     assert calls[-1]["steps"] == ["join", "model", "validate"]
+
+
+# ══════════════════════════════════════════════════════════════
+# J. 계약 정합 회귀 — 2026-08-26 프론트-백엔드 계약 불일치 수정분
+# ══════════════════════════════════════════════════════════════
+
+def test_recommendation_cellids_balance_swap_is_consistent(c):
+    """지도 영역(cellIds) + balance — 치환이 응답 전체에서 한목소리인가.
+
+    치환 자체는 계약이다(API_SPEC §8 — 범위가 지정되면 balance 는 efficiency 로
+    대체). 예전에는 region 만 보고 판정해서 cellIds 로 제한하면
+    ① strategies 목록에 balance 가 남아 고르면 조용히 efficiency 결과가 오고
+    ② simulation.name 은 치환 전 라벨("지역 균형 추천안")로 나갔고
+    ③ alternatives 에도 balance 가 다시 끼었다."""
+    ids = [x["cellId"] for x in
+           c.get("/api/v1/priorities?period=am&limit=5").json()["items"]]
+    j = c.post("/api/v1/recommendations",
+               json={"period": "am", "strategy": "balance", "budgetKrw": BUDGET,
+                     "cellIds": ids, "includeAlternatives": True}).json()
+    assert j["strategy"] == "efficiency"
+    assert j["simulation"]["name"] == j["strategyLabel"] + " 추천안"
+    assert "balance" not in [s["id"] for s in j["strategies"]]
+    assert "balance" not in [a["strategy"] for a in j["alternatives"]]
+
+
+def test_chat_daytype_is_validated(c):
+    r = c.post("/api/v1/chat", json={"daytype": "xx",
+                                     "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 400
+
+
+def test_chat_pack_follows_daytype(c):
+    """주말 화면을 보며 물으면 <사실> 팩도 주말 수치여야 한다 — 예전에는 평일 키
+    고정이라 주말 needCells 를 물어도 평일 값으로 답하는 조용한 불일치였다."""
+    import server.main as m
+    assert m._chat_pack("am", "wd")["현재KPI"] == m.DATA["grid_am"]["kpi"]
+    assert m._chat_pack("am", "we")["현재KPI"] == m.DATA["grid_am_we"]["kpi"]
+    assert m._chat_pack("am", "we")["현재시간대"]["요일유형"] == "주말"
+
+
+def test_trips_kpi_reads_weekend_cells(c, monkeypatch):
+    """_trips_kpi(dt="we") 가 주말 셀 사전을 읽는가 — 예전에는 평일 셀을 읽었고,
+    현재 배포 데이터는 wd/we 의 flowTripsPerDay 가 같아 티가 안 났을 뿐이다.
+    주말 셀만 1씩 흘려 바꿔 본다: 평일 셀을 읽는 구현이면 변화가 안 보인다."""
+    import server.main as m
+    quad = m.DATA["sim"].S0["am"]["quad0"]
+    before, _ = m._trips_kpi("am", quad, dt="we")
+    bumped = {gid: dict(cell, flowTripsPerDay=cell["flowTripsPerDay"] + 1)
+              for gid, cell in m.DATA["cells"]["am_we"].items()}
+    monkeypatch.setitem(m.DATA["cells"], "am_we", bumped)
+    after, _ = m._trips_kpi("am", quad, dt="we")
+    n_need = int((quad == "need").sum())
+    assert n_need > 0 and after == before + n_need
+
+
+def test_meta_cost_compare_single_source(c):
+    """/meta 의 costCompare 와 /recommendations summary 가 같은 정본(COST_COMPARE)을
+    읽는가. 예전에는 summary 에만 하드코딩돼 있어 프론트 report.js 가
+    meta.costCompare 를 우선 참조하고도 항상 자기 폴백 문구로 떨어졌다."""
+    meta = c.get("/api/v1/meta").json()
+    assert meta["costCompare"]["basis"] == "total"
+    j = c.post("/api/v1/recommendations",
+               json={"period": "am", "budgetKrw": BUDGET}).json()
+    assert j["summary"]["costCompareBasis"] == meta["costCompare"]["basis"]
+    assert j["summary"]["costCompareLabel"] == meta["costCompare"]["label"]
+    assert j["summary"]["costCompareNote"] == meta["costCompare"]["note"]

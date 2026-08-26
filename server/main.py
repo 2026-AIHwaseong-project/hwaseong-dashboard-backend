@@ -77,6 +77,17 @@ STRAT_META = {
     "quick":      {"label": "즉시 착수", "note": "시설비 없이 정류장 신설만 선택합니다."},
 }
 
+# 비용 비교 기준의 단일 정본. /recommendations 의 summary 와 /meta 의 costCompare 가
+# 같은 값을 읽는다 — 예전에는 summary 쪽에만 하드코딩돼 있어서, 프론트 report.js 가
+# meta.costCompare 를 우선 참조하고도 항상 자기 폴백 문구로 떨어졌다(같은 개념이
+# 서버·프론트에 각각 존재하는 상태). 기준을 바꿀 일이 생기면 여기 한 곳만 고친다.
+COST_COMPARE = {
+    "basis": "total",
+    "label": "총사업비 기준",
+    "note": "예산 한도와 같은 기준(총사업비)으로 비교했습니다. "
+            "똑버스·증편은 이듬해에도 같은 예산이 필요합니다.",
+}
+
 DATA: dict = {}
 
 
@@ -126,6 +137,11 @@ def _build_data_snapshot() -> dict:
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     src["sim"] = m
+    # 비용 비교 기준을 meta 에 싣는다. 계약 JSON(05_load.py)에는 아직 없는 키라
+    # 여기서 보충한다 — 프론트 report.js 가 '산출식·주석' 시트의 "비용 비교 기준"
+    # 항목을 meta.costCompare 로 채우는 계약(docs/API.md). JSON·DB 두 경로가 같은
+    # 함수를 지나므로 06_verify_db 의 바이트 대조도 그대로 성립한다.
+    src["meta"].setdefault("costCompare", dict(COST_COMPARE))
     src["_source"] = "db" if from_db else "json"
     src["_loadedAt"] = admin.now_kst().isoformat(timespec="seconds")
     return src
@@ -321,7 +337,7 @@ def _apply_cumulative(sim, placements: list, state: Optional[dict] = None) -> di
     return state
 
 
-def _trips_kpi(p: str, quad_arr) -> tuple:
+def _trips_kpi(p: str, quad_arr, dt: str = "wd") -> tuple:
     """사각지대 잠재수요 — /grid 와 **같은 산식**이어야 한다.
 
     이전에는 sim.S0[p]["potential"] 을 전 격자(1km 배포판 기준 786칸)에 대해 합했는데, 그건
@@ -337,8 +353,13 @@ def _trips_kpi(p: str, quad_arr) -> tuple:
 
     여기서는 05_load.py 와 같이 **need 격자의 flowTripsPerDay** 를 센다.
     셀별 반올림 정수를 합해야 화면의 셀 합과 어긋나지 않는다(1916b8b 와 같은 이유).
+
+    dt="we" 면 주말 셀 사전을 읽는다. 주말 quad 배열(weekendImpact)에 평일 셀을
+    섞으면 wd/we 의 flowTripsPerDay 가 갈라지는 순간 델타가 어긋난다 — 현재 배포
+    데이터는 두 값이 같아 티가 안 났을 뿐이다. 주말 키가 없는 구버전 산출물이면
+    평일 셀로 내려간다(weekendImpact 자체가 그때는 None 이라 실제로는 안 온다).
     """
-    cells = DATA["cells"][p]
+    cells = DATA["cells"].get(f"{p}_we" if dt == "we" else p) or DATA["cells"][p]
     trips, eld = 0, 0.0
     for gid, q in zip(DATA["sim"].GIDS, quad_arr):
         if q != "need":
@@ -979,9 +1000,12 @@ def run_recommendations(req: RecRequest):
     )
 
     placements_raw = [{"type": pl["mode"], "cellId": pl["gid"], "count": 1} for pl in placed]
+    # 치환 후 strategy 로 이름을 짓는다. req.strategy 를 쓰면 balance→efficiency 로
+    # 바꿔 계산해 놓고 이름만 "지역 균형 추천안" 인 응답이 나간다(strategy 필드와
+    # simulation.name 이 서로 다른 말을 하는 상태였다).
     sim_resp = _build_sim_response(
         sim, placements_raw, final_state,
-        f"{STRAT_META[req.strategy]['label']} 추천안", req.budgetKrw,
+        f"{STRAT_META[strategy]['label']} 추천안", req.budgetKrw,
     )
 
     # 배치별 기여를 **4시간대 합산**으로 다시 잰다.
@@ -1053,8 +1077,8 @@ def run_recommendations(req: RecRequest):
         p = req.period
         bk_we = sim.BASE_KPI_WE[p]
         r_we = sim.compute(p, final_state_we[p]["freq"], final_state_we[p]["nearest"], dt="we")
-        now_trips, now_eld = _trips_kpi(p, r_we["quad"])
-        base_trips, base_eld = _trips_kpi(p, sim.S0_WE[p]["quad0"])
+        now_trips, now_eld = _trips_kpi(p, r_we["quad"], dt="we")
+        base_trips, base_eld = _trips_kpi(p, sim.S0_WE[p]["quad0"], dt="we")
         weekend_impact = {
             "period": p,
             "needCellsDelta": r_we["need"] - bk_we["need"],
@@ -1080,9 +1104,12 @@ def run_recommendations(req: RecRequest):
         "strategyLabel": STRAT_META[strategy]["label"],
         "strategyNote": STRAT_META[strategy]["note"],
         "note": STRAT_META[strategy]["note"],
+        # balance 제외 조건은 치환 조건(위 region_ids)과 같아야 한다. req.region 만
+        # 보면 지도 영역(cellIds)으로 제한한 상태에서 balance 가 목록에 남아,
+        # 고르면 조용히 efficiency 결과가 돌아온다.
         "strategies": [{"id": k, "label": v["label"], "note": v["note"]}
                        for k, v in STRAT_META.items()
-                       if not (req.region and k == "balance")],
+                       if not (region_ids is not None and k == "balance")],
         "budgetKrw": req.budgetKrw,
         "usedKrw": total_krw,
         "remainingKrw": req.budgetKrw - total_krw,
@@ -1108,10 +1135,9 @@ def run_recommendations(req: RecRequest):
             "expectedResolvedElderlyTrips": resolved_eld,
             "krwPerTrip": int(total_krw / resolved_trips) if resolved_trips > 0 else None,
             "stoppedBecause": stopped,
-            "costCompareBasis": "total",
-            "costCompareLabel": "총사업비 기준",
-            "costCompareNote": "예산 한도와 같은 기준(총사업비)으로 비교했습니다. "
-                               "똑버스·증편은 이듬해에도 같은 예산이 필요합니다.",
+            "costCompareBasis": COST_COMPARE["basis"],
+            "costCompareLabel": COST_COMPARE["label"],
+            "costCompareNote": COST_COMPARE["note"],
         },
         "simulation": sim_resp,
         "weekendImpact": weekend_impact,
@@ -1120,7 +1146,7 @@ def run_recommendations(req: RecRequest):
     if req.includeAlternatives:
         alts = []
         for s in ["efficiency", "equity", "balance", "quick"]:
-            if s == strategy or (req.region and s == "balance"):
+            if s == strategy or (region_ids is not None and s == "balance"):
                 continue
             alt_types = ["stop"] if s == "quick" else list(req.allowedTypes)
             try:
@@ -1896,11 +1922,11 @@ def _extract_json(text: str):
     return None
 
 
-def _region_digest(period: str) -> list:
+def _region_digest(period: str, daytype: str = "wd") -> list:
     """읍면동별 한 줄 요약. "향남읍은 어때?" 류에 답하려면 Top10(시 전체)만으로는
     부족합니다. 29개 × 한 줄이라 2KB 안팎이고, 격자 786개를 통째로 넣는 것(356KB)과
     달리 프롬프트에 들어갑니다."""
-    cells = DATA[f"grid_{period}"]["cells"]
+    cells = DATA[_grid_key(period, daytype)]["cells"]
     by: dict = {}
     for c in cells:
         r = by.setdefault(c["region"], {"n": 0, "need": 0, "drt": 0, "top": None})
@@ -1923,13 +1949,18 @@ def _region_digest(period: str) -> list:
     return out
 
 
-def _chat_pack(period: str) -> dict:
+def _chat_pack(period: str, daytype: str = "wd") -> dict:
     """프롬프트에 실을 사실 묶음. **모델이 말하는 수치는 전부 여기서만 나와야 합니다.**
+
+    daytype 을 받는 이유 — 대시보드에는 평일/주말 토글이 있는데 이 팩이 평일 키만
+    읽으면, 주말 화면(예: 출근 needCells 47)을 보며 물어도 챗봇이 평일 수치(30)로
+    답합니다. "화면 수치는 전부 실측" 방침과 충돌하는 조용한 불일치였습니다.
 
     ⚠️ meta 를 통째로 넣지 마세요. meta.map.regions 가 읍면동 경계 폴리곤 좌표라
        혼자 13.5만 자입니다(전체 meta 의 99%). 챗봇이 읽을 지식이 아닙니다."""
     meta = DATA["meta"]
-    top = sorted([c for c in DATA[f"grid_{period}"]["cells"]
+    gkey = _grid_key(period, daytype)
+    top = sorted([c for c in DATA[gkey]["cells"]
                   if c["quadrant"] in ("need", "drt")],
                  key=lambda c: c["priorityScore"], reverse=True)[:10]
     return {
@@ -1937,16 +1968,17 @@ def _chat_pack(period: str) -> dict:
                  ("formula", "assumptions", "cost", "effects", "dataQuality", "grid")
                  if k in meta},
         "시간대": meta.get("periods"),
-        "현재시간대": {"id": period, "name": PERIOD_NAME[period], "hours": PERIOD_HOURS[period]},
-        "현재KPI": DATA[f"grid_{period}"]["kpi"],
+        "현재시간대": {"id": period, "name": PERIOD_NAME[period], "hours": PERIOD_HOURS[period],
+                       "요일유형": "주말" if daytype == "we" else "평일"},
+        "현재KPI": DATA[gkey]["kpi"],
         "우선순위Top10": [
             {"rank": i + 1, "cellId": c["id"], "name": c["name"], "region": c["region"],
              "mi": c["mi"], "demand": c["demand"], "supply": c["supply"],
              "coverage": c["coverage"], "action": ACTION_LABEL.get(c["action"], c["action"])}
             for i, c in enumerate(top)
         ],
-        "읍면동요약": _region_digest(period),
-        "규모": {"격자": len(DATA[f"grid_{period}"]["cells"]),
+        "읍면동요약": _region_digest(period, daytype),
+        "규모": {"격자": len(DATA[gkey]["cells"]),
                  "정류장": len(DATA["stops"]["stops"]),
                  "노선": len(DATA["routes"]["routes"])},
     }
@@ -2099,6 +2131,7 @@ def _sse(event: str, data: dict) -> str:
 class ChatRequest(BaseModel):
     mode: str = "help"               # help | report
     period: str = "am"
+    daytype: str = "wd"              # wd | we — <사실> 팩이 화면과 같은 요일축을 읽게
     messages: list = []              # [{role:'user'|'assistant', content}] — 이력은 클라이언트 보관
     context: dict = {}               # 지금 화면 상태 {cellId, layer, routeId, …}
     draft: Optional[dict] = None     # mode=report 일 때 현재 초안
@@ -2242,6 +2275,7 @@ async def _chat_sse(provider: str, model: str, system: str, msgs: list, mode: st
 @app.post("/api/v1/chat")
 async def chat(req: ChatRequest):
     _chk_period(req.period)
+    _chk_daytype(req.daytype)
     if req.mode not in ("help", "report"):
         raise HTTPException(400, "mode는 help 또는 report 여야 합니다.")
 
@@ -2270,7 +2304,7 @@ async def chat(req: ChatRequest):
     system = (
         rules
         + "\n\n<지식>\n" + kb
-        + "\n\n<사실>\n" + json.dumps(_chat_pack(req.period), ensure_ascii=False)
+        + "\n\n<사실>\n" + json.dumps(_chat_pack(req.period, req.daytype), ensure_ascii=False)
         + "\n\n<지금 화면>\n" + json.dumps(req.context, ensure_ascii=False)
     )
     if req.mode == "report":
