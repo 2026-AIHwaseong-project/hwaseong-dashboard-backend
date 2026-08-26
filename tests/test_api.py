@@ -896,6 +896,9 @@ def test_admin_params_no_range_limits(c, monkeypatch, tmp_path):
         rows = {p["key"]: p for p in c.get("/api/v1/admin/params").json()["params"]}
         assert rows["sim.headwayMult"]["min"] is None and rows["sim.headwayMult"]["max"] is None
         assert rows["sim.headwayMult"]["effective"] == 5.0
+        # 사유는 선택 — 없이도 저장된다 (2026-08-26 완화)
+        assert c.post("/api/v1/admin/params", json={
+            "changes": {"sim.phi.night": 3.0}}).status_code == 200
         assert c.post("/api/v1/admin/params", json={
             "reason": "비용 0 가드", "actor": "test",
             "changes": {"cost.stop.krw": 0}}).status_code == 400
@@ -971,9 +974,15 @@ def test_grid_override_wiring(c, monkeypatch, tmp_path):
         assert c.post("/api/v1/admin/grid-overrides", json={
             "gridId": gid, "period": "am", "field": "mi", "value": 1.0,
             "reason": "다섯자넘는사유"}).status_code == 400
-        assert c.post("/api/v1/admin/grid-overrides", json={
-            "gridId": gid, "period": "am", "field": "quadrant", "value": "need",
-            "reason": "짧다"}).status_code == 400
+        # 사유는 선택(2026-08-26 완화) — 비워도 저장되고, 같은 자리 재저장은
+        # 옛것을 자동 취소하며 진짜 원값(prev)을 물려받는다
+        r2 = c.post("/api/v1/admin/grid-overrides", json={
+            "gridId": gid, "period": "am", "daytype": "wd",
+            "field": "quadrant", "value": "need"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["override"]["reason"] == ""
+        assert r2.json()["override"]["prev"] == "mid"
+        rec_id = r2.json()["override"]["id"]
         assert c.post("/api/v1/admin/grid-overrides", json={
             "gridId": "없는격자", "period": "am", "field": "quadrant", "value": "need",
             "reason": "다섯자넘는사유"}).status_code == 400

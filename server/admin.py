@@ -1161,9 +1161,10 @@ class SaveRequest(BaseModel):
 def save_params(req: SaveRequest, _w=Depends(require_write)):
     if JOB["status"] == "running":
         raise HTTPException(409, "데이터 갱신이 진행 중입니다. 끝난 뒤 다시 시도하세요.")
-    reason = (req.reason or "").strip()
-    if len(reason) < 5:
-        raise HTTPException(400, "reason 은 5자 이상이어야 합니다 — 왜 값을 고쳤는지 기록이 남아야 합니다.")
+    # 사유는 선택이다(2026-08-26 완화). 이전에는 5자 이상을 강제했는데, 화면이
+    # '관리자 콘솔에서 수정'이라는 무의미한 문구로 자동 충족시키는 결과만 낳았다 —
+    # 강제가 기록의 질을 만들지 못했다. 적으면 이력의 '왜' 칸에 남는다.
+    reason = (req.reason or "").strip()[:200]
     if not req.changes:
         raise HTTPException(400, "changes 가 비어 있습니다.")
 
@@ -1261,10 +1262,10 @@ def list_grid_overrides(can_write: bool = Depends(require_read)):
 
 @router.post("/grid-overrides")
 def save_grid_override(req: GridOverrideRequest, _w=Depends(require_write)):
-    reason = (req.reason or "").strip()
-    if len(reason) < 5:
-        raise HTTPException(400, "reason 은 5자 이상이어야 합니다 — 왜 모델 값을 사람이 "
-                                 "고쳤는지는 심사에서 반드시 나오는 질문입니다.")
+    # 사유는 선택 — save_params 와 같은 완화(같은 자리 주석 참고). "왜 모델 값을
+    # 사람이 고쳤는가"는 여전히 심사 단골 질문이라 화면이 입력을 권하지만,
+    # 빈 사유로도 막지는 않는다.
+    reason = (req.reason or "").strip()[:200]
     if req.field not in GRID_FIELDS:
         raise HTTPException(400, f"field 는 {list(GRID_FIELDS)} 중 하나여야 합니다 "
                                  f"(받은 값: {req.field!r}). mi·demand·supply 는 색 bin· "
