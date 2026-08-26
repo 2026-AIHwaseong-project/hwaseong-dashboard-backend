@@ -284,16 +284,34 @@ def _derive_action(coverage: float, quadrant: str) -> str:
 
 
 # ─── 시뮬레이션 내부 함수 ──────────────────────────────────────────────────────
-def _apply_cumulative(sim, placements: list, state: Optional[dict] = None) -> dict:
+def _S0(sim, daytype: str) -> dict:
+    """평일/주말 기준선 묶음. daytype='we' 인데 sim.S0_WE 가 없으면(팀원이
+    04_model.py 를 아직 안 돌렸다든지) 조용히 평일로 새지 않도록 막는다 —
+    호출자는 반드시 이 함수 전에 _chk_daytype 를 거쳤어야 한다."""
+    if daytype == "wd":
+        return sim.S0
+    if sim.S0_WE is None:
+        raise HTTPException(400, "이 서버에는 주말 기준선(S0_WE)이 없습니다.")
+    return sim.S0_WE
+
+
+def _apply_cumulative(sim, placements: list, state: Optional[dict] = None,
+                       daytype: str = "wd") -> dict:
     """배치 목록을 순차 적용 → 4시간대 state {freq, nearest} 반환.
 
     state 를 주면 그 위에 **제자리로** 이어 붙인다. 배치를 하나씩 늘려가며
     단계별 효과를 재는 쪽이 매번 처음부터 다시 쌓지 않게 하려는 것이다
     (그렇게 하면 배치 수의 제곱에 비례해 느려진다).
+
+    daytype — 물리 배치(정류장 위치·반경 등)는 요일과 무관하지만, 그 배치가
+    "지금 배차 위에 얼마나 얹히는지"(freq 증분)는 출발점이 요일마다 다른
+    배차량(S0/STOP_FREQ vs S0_WE/STOP_FREQ_WE)이라 달라진다.
     """
+    S0 = _S0(sim, daytype)
+    STOP_FREQ = sim.STOP_FREQ if daytype == "wd" else sim.STOP_FREQ_WE
     if state is None:
-        state = {p: {"freq": sim.S0[p]["freq"].copy(),
-                     "nearest": sim.S0[p]["nearest"].copy()} for p in PERIODS}
+        state = {p: {"freq": S0[p]["freq"].copy(),
+                     "nearest": S0[p]["nearest"].copy()} for p in PERIODS}
     for pl in placements:
         gi = sim.IDX.get(str(pl.get("cellId", "")))
         if gi is None:
@@ -317,11 +335,11 @@ def _apply_cumulative(sim, placements: list, state: Optional[dict] = None) -> di
                 ds = np.sqrt((sim.SX - sim.GX[gi])**2 + (sim.SY - sim.GY[gi])**2)
                 ms = ds <= sim.R_FINAL["freq"]
                 mult = sim.HEADWAY_MULT ** count - 1
-                f += sim.Wsg[:, ms] @ (sim.STOP_FREQ[p][ms] * mult)
+                f += sim.Wsg[:, ms] @ (STOP_FREQ[p][ms] * mult)
     return state
 
 
-def _trips_kpi(p: str, quad_arr) -> tuple:
+def _trips_kpi(p: str, quad_arr, daytype: str = "wd") -> tuple:
     """사각지대 잠재수요 — /grid 와 **같은 산식**이어야 한다.
 
     이전에는 sim.S0[p]["potential"] 을 전 격자(1km 배포판 기준 786칸)에 대해 합했는데, 그건
@@ -338,7 +356,7 @@ def _trips_kpi(p: str, quad_arr) -> tuple:
     여기서는 05_load.py 와 같이 **need 격자의 flowTripsPerDay** 를 센다.
     셀별 반올림 정수를 합해야 화면의 셀 합과 어긋나지 않는다(1916b8b 와 같은 이유).
     """
-    cells = DATA["cells"][p]
+    cells = DATA["cells"][p if daytype == "wd" else f"{p}_we"]
     trips, eld = 0, 0.0
     for gid, q in zip(DATA["sim"].GIDS, quad_arr):
         if q != "need":
@@ -354,11 +372,12 @@ def _trips_kpi(p: str, quad_arr) -> tuple:
     return trips, int(round(eld))
 
 
-def _period_kpi(sim, p: str, r: dict) -> tuple:
-    bk = sim.BASE_KPI[p]
+def _period_kpi(sim, p: str, r: dict, daytype: str = "wd") -> tuple:
+    S0 = _S0(sim, daytype)
+    bk = (sim.BASE_KPI if daytype == "wd" else sim.BASE_KPI_WE)[p]
     n  = sim.N
-    now_trips, now_eld = _trips_kpi(p, r["quad"])
-    base_trips, base_eld = _trips_kpi(p, sim.S0[p]["quad0"])
+    now_trips, now_eld = _trips_kpi(p, r["quad"], daytype)
+    base_trips, base_eld = _trips_kpi(p, S0[p]["quad0"], daytype)
     kpi = {
         "needCells": r["need"],
         "drtCells": r["drt"],
@@ -371,7 +390,7 @@ def _period_kpi(sim, p: str, r: dict) -> tuple:
     baseline = {
         "needCells": bk["need"],
         "drtCells": bk["drt"],
-        "overCells": int((sim.S0[p]["quad0"] == "over").sum()),
+        "overCells": int((S0[p]["quad0"] == "over").sum()),
         "totalCells": n,
         "needShare": round(bk["need"] / n * 100, 1),
         "potentialTripsPerDay": base_trips,
@@ -385,7 +404,8 @@ def _period_kpi(sim, p: str, r: dict) -> tuple:
     return kpi, baseline, delta
 
 
-def _cells_for_period(sim, p: str, r: dict, base_cells: dict) -> list:
+def _cells_for_period(sim, p: str, r: dict, base_cells: dict, daytype: str = "wd") -> list:
+    S0 = _S0(sim, daytype)
     cells = []
     for gi, gid in enumerate(sim.GIDS):
         bc = base_cells.get(gid)
@@ -418,7 +438,7 @@ def _cells_for_period(sim, p: str, r: dict, base_cells: dict) -> list:
             "actionLabel": ACTION_LABEL[act_new],
             "priorityScore": bc["priorityScore"],
             "nearestStopId": bc["nearestStopId"],
-            "adjusted": abs(mi_new - float(sim.S0[p]["mi0"][gi])) > 1e-6,
+            "adjusted": abs(mi_new - float(S0[p]["mi0"][gi])) > 1e-6,
             "bins": {
                 "mi": int(r["bin"][gi]),
                 "demand": bc["bins"]["demand"],
@@ -429,12 +449,15 @@ def _cells_for_period(sim, p: str, r: dict, base_cells: dict) -> list:
     return cells
 
 
-def _build_sim_response(sim, placements_raw: list, state: dict, name: str, budget_krw: int) -> dict:
-    results = {p: sim.compute(p, state[p]["freq"], state[p]["nearest"]) for p in PERIODS}
+def _build_sim_response(sim, placements_raw: list, state: dict, name: str, budget_krw: int,
+                         daytype: str = "wd") -> dict:
+    S0 = _S0(sim, daytype)
+    BASE_KPI = sim.BASE_KPI if daytype == "wd" else sim.BASE_KPI_WE
+    results = {p: sim.compute(p, state[p]["freq"], state[p]["nearest"], dt=daytype) for p in PERIODS}
 
     periods_list = []
     for p in PERIODS:
-        kpi, baseline, delta = _period_kpi(sim, p, results[p])
+        kpi, baseline, delta = _period_kpi(sim, p, results[p], daytype)
         periods_list.append({"period": p, "periodName": PERIOD_NAME[p],
                               "kpi": kpi, "baseline": baseline, "delta": delta})
 
@@ -448,16 +471,18 @@ def _build_sim_response(sim, placements_raw: list, state: dict, name: str, budge
                            "count": count, "amountKrw": unit * count})
     total_krw = sum(x["amountKrw"] for x in breakdown)
 
-    resolved = sum(sim.BASE_KPI[p]["need"] - results[p]["need"] for p in PERIODS)
+    resolved = sum(BASE_KPI[p]["need"] - results[p]["need"] for p in PERIODS)
     total_dB = sum(
-        sim.dB_hat(p, state[p]["freq"] - sim.S0[p]["freq"],
-                   results[p]["cov"] - sim.BASE_KPI[p]["cov"])
+        sim.dB_hat(p, state[p]["freq"] - S0[p]["freq"],
+                   results[p]["cov"] - BASE_KPI[p]["cov"], dt=daytype)
         for p in PERIODS
     )
 
-    base_cells = DATA["cells"]
+    # 격자 표시명·지역·좌표 같은 정적 정보는 요일과 무관하지만, DATA["cells"]
+    # 는 wd/we 를 별 키로 나눠 담고 있다(server/main.py _build_data_snapshot).
+    base_cells = {p: DATA["cells"][p if daytype == "wd" else f"{p}_we"] for p in PERIODS}
     cells_by_period = {
-        p: _cells_for_period(sim, p, results[p], base_cells[p]) for p in PERIODS
+        p: _cells_for_period(sim, p, results[p], base_cells[p], daytype) for p in PERIODS
     }
 
     pl_list = []
@@ -568,6 +593,7 @@ def get_stop_profile(stop_id: str):
 class SimRequest(BaseModel):
     name: str = "시나리오"
     period: str = "am"
+    daytype: str = "wd"
     # None 이면 관리자 파라미터(cost.defaultBudget)로 보충한다 — 여기 리터럴을 두면
     # 관리자가 기본 예산을 바꿔도 이 사본만 옛값으로 남는다.
     budgetKrw: Optional[int] = None
@@ -631,6 +657,7 @@ def _validate_placements(sim, placements: list) -> list:
 @app.post("/api/v1/simulations")
 def run_simulation(req: SimRequest):
     _chk_period(req.period)
+    _chk_daytype(req.daytype)
     if req.budgetKrw is None:
         req.budgetKrw = admin.effective("cost.defaultBudget")
     # /recommendations 는 이미 막고 있는데 여기만 빠져 있었다. 음수 예산이 들어오면
@@ -639,8 +666,8 @@ def run_simulation(req: SimRequest):
         raise HTTPException(400, "budgetKrw 는 0 이상이어야 합니다.")
     sim   = DATA["sim"]
     placements = _validate_placements(sim, req.placements)
-    state = _apply_cumulative(sim, placements)
-    return _json(_build_sim_response(sim, placements, state, req.name, req.budgetKrw))
+    state = _apply_cumulative(sim, placements, daytype=req.daytype)
+    return _json(_build_sim_response(sim, placements, state, req.name, req.budgetKrw, req.daytype))
 
 
 # ─── 8. POST /api/v1/recommendations ──────────────────────────────────────────
@@ -1053,8 +1080,8 @@ def run_recommendations(req: RecRequest):
         p = req.period
         bk_we = sim.BASE_KPI_WE[p]
         r_we = sim.compute(p, final_state_we[p]["freq"], final_state_we[p]["nearest"], dt="we")
-        now_trips, now_eld = _trips_kpi(p, r_we["quad"])
-        base_trips, base_eld = _trips_kpi(p, sim.S0_WE[p]["quad0"])
+        now_trips, now_eld = _trips_kpi(p, r_we["quad"], "we")
+        base_trips, base_eld = _trips_kpi(p, sim.S0_WE[p]["quad0"], "we")
         weekend_impact = {
             "period": p,
             "needCellsDelta": r_we["need"] - bk_we["need"],
