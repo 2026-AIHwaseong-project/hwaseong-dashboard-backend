@@ -850,16 +850,16 @@ def test_chat_pack_follows_daytype(c):
 
 
 def test_trips_kpi_reads_weekend_cells(c, monkeypatch):
-    """_trips_kpi(dt="we") 가 주말 셀 사전을 읽는가 — 예전에는 평일 셀을 읽었고,
+    """_trips_kpi(daytype="we") 가 주말 셀 사전을 읽는가 — 예전에는 평일 셀을 읽었고,
     현재 배포 데이터는 wd/we 의 flowTripsPerDay 가 같아 티가 안 났을 뿐이다.
     주말 셀만 1씩 흘려 바꿔 본다: 평일 셀을 읽는 구현이면 변화가 안 보인다."""
     import server.main as m
     quad = m.DATA["sim"].S0["am"]["quad0"]
-    before, _ = m._trips_kpi("am", quad, dt="we")
+    before, _ = m._trips_kpi("am", quad, "we")
     bumped = {gid: dict(cell, flowTripsPerDay=cell["flowTripsPerDay"] + 1)
               for gid, cell in m.DATA["cells"]["am_we"].items()}
     monkeypatch.setitem(m.DATA["cells"], "am_we", bumped)
-    after, _ = m._trips_kpi("am", quad, dt="we")
+    after, _ = m._trips_kpi("am", quad, "we")
     n_need = int((quad == "need").sum())
     assert n_need > 0 and after == before + n_need
 
