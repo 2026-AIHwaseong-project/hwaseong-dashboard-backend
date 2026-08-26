@@ -1224,6 +1224,7 @@ MAX_SCENARIOS = 2000    # 폴더 상한. 오래된 것을 조용히 지우면 �
 class ScenarioSaveRequest(BaseModel):
     name: str = ""
     period: str = "am"
+    daytype: str = "wd"     # 시뮬 요일 토글(SimRequest.daytype)과 같은 축 — 복원 시 그대로 돌려준다
     budgetKrw: Optional[int] = None
     placements: list = []
 
@@ -1231,6 +1232,7 @@ class ScenarioSaveRequest(BaseModel):
 @app.post("/api/v1/scenarios")
 def save_scenario(req: ScenarioSaveRequest):
     _chk_period(req.period)
+    _chk_daytype(req.daytype)
     sim = DATA["sim"]
     placements = _validate_placements(sim, req.placements)
     if not placements:
@@ -1246,8 +1248,9 @@ def save_scenario(req: ScenarioSaveRequest):
         raise HTTPException(409, "저장된 공유 시나리오가 상한에 닿았습니다 — "
                                  "서버 운영자가 var/scenarios/ 를 정리해야 합니다.")
     sid = secrets.token_urlsafe(9)          # 12자, SCEN_ID_RE 형식
-    doc = {"id": sid, "name": name, "period": req.period, "budgetKrw": budget,
-           "placements": placements, "createdAt": admin.now_kst().isoformat(timespec="seconds")}
+    doc = {"id": sid, "name": name, "period": req.period, "daytype": req.daytype,
+           "budgetKrw": budget, "placements": placements,
+           "createdAt": admin.now_kst().isoformat(timespec="seconds")}
     tmp = SCEN_DIR / f"{sid}.tmp"
     tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), "utf-8")
     os.replace(tmp, SCEN_DIR / f"{sid}.json")

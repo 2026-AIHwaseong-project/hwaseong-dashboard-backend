@@ -921,13 +921,17 @@ def test_scenario_share_roundtrip(c, monkeypatch, tmp_path):
     monkeypatch.setattr(m, "SCEN_DIR", tmp_path / "scenarios")
     cell = c.get("/api/v1/priorities?period=am&limit=1").json()["items"][0]["cellId"]
     r = c.post("/api/v1/scenarios", json={
-        "name": "공유 검증\x07시나리오", "period": "am", "budgetKrw": 1_000_000_000,
+        "name": "공유 검증\x07시나리오", "period": "am", "daytype": "we",
+        "budgetKrw": 1_000_000_000,
         "placements": [{"type": "drt", "cellId": cell, "count": 2}]})
     assert r.status_code == 200, r.text
     sid = r.json()["id"]
     got = c.get(f"/api/v1/scenarios/{sid}").json()
     assert got["name"] == "공유 검증시나리오"          # 제어문자는 걷어낸다
     assert got["period"] == "am" and got["budgetKrw"] == 1_000_000_000
+    assert got["daytype"] == "we"                     # 요일 토글 상태가 링크로 복원된다
+    assert c.post("/api/v1/scenarios", json={
+        "daytype": "xx", "placements": [{"type": "drt", "cellId": cell}]}).status_code == 400
     assert got["placements"] == [{"type": "drt", "cellId": cell, "count": 2}]
     # 빈 시나리오·형식 위반 id·없는 id 는 각각 400/400/404
     assert c.post("/api/v1/scenarios", json={"placements": []}).status_code == 400
