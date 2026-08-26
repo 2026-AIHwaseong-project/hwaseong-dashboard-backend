@@ -998,3 +998,53 @@ def test_grid_override_wiring(c, monkeypatch, tmp_path):
     c3 = next(x for x in g3["cells"] if x["id"] == gid)
     assert c3["quadrant"] == "mid" and c3["overridden"] is False
     assert g3["kpi"]["needCells"] == kpi0
+
+
+def test_pipeline_params_unlocked_and_boot_safe(c, monkeypatch, tmp_path):
+    """모델·기준선 상수 개방(2026-08-26) — 저장은 requiresRefresh 로 답하고,
+    재계산 전에 서버가 재기동돼도 시뮬 엔진이 죽지 않는다(크래시 루프 회귀).
+
+    잠갔던 이유가 이것이었다: params.py 가 import 시점에 오버라이드를 적용하는데
+    엔진이 params 에서 상수를 직접 읽어, 옛 산출물과 새 상수가 어긋나면 기준선
+    assert 로 서버가 못 떴다. 지금은 엔진이 norm_stats(산출물)에서 읽는다 —
+    아래에서 params 는 오버라이드 값(9.0)을, 엔진은 산출물 값(2.0)을 들고 있어야
+    한다. 같은 프로세스에서 두 값이 공존하는 것이 이 설계의 증명이다."""
+    from server import admin
+    d = tmp_path / "admin"
+    d.mkdir()
+    monkeypatch.setattr(admin, "ADMIN_DIR", d)
+    monkeypatch.setattr(admin, "OVERRIDE_PATH", d / "params_override.json")
+    monkeypatch.setattr(admin, "HISTORY_PATH", d / "history.jsonl")
+    try:
+        r = c.post("/api/v1/admin/params", json={
+            "reason": "개방 검증",
+            "changes": {"model.minFreqPerHour": 9.0, "baseline.wFreq": 0.5}})
+        assert r.status_code == 200, r.text
+        assert set(r.json()["requiresRefresh"]) == {"baseline.wFreq", "model.minFreqPerHour"}
+        rows = {p["key"]: p for p in c.get("/api/v1/admin/params").json()["params"]}
+        assert rows["model.minFreqPerHour"]["editable"] is True
+        assert rows["baseline.wFreq"]["editable"] is True
+        # 재계산 전 — 실제 적용값(산출물의 자)은 그대로고 '재계산 대기'가 선다
+        assert rows["baseline.wFreq"]["effective"] == 0.78
+        assert rows["baseline.wFreq"]["pending"] is True
+        # 크래시 루프 회귀 — 오버라이드가 있는 채로 엔진을 새로 exec(=재기동 경로)
+        import os
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import importlib.util;"
+             "spec=importlib.util.spec_from_file_location('sim_boot','analysis/05_simulate.py');"
+             "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
+             "import params;"
+             "print(m.MIN_FREQ_PER_H, params.MIN_FREQ_PER_H, m.W_FREQ)"],
+            cwd=str(ROOT), env={**os.environ, "HW_VAR_DIR": str(tmp_path)},
+            capture_output=True, text=True, timeout=300)
+        assert out.returncode == 0, (out.stdout or "") + (out.stderr or "")
+        sim_min, params_min, sim_wfreq = out.stdout.split()[-3:]
+        assert float(sim_min) == 2.0      # 엔진 = 산출물의 자 (재계산 전 옛 값 유지)
+        assert float(params_min) == 9.0   # 파이프라인 = 오버라이드 (재계산이 쓸 값)
+        assert float(sim_wfreq) == 0.78
+    finally:
+        if admin.OVERRIDE_PATH.exists():
+            admin.OVERRIDE_PATH.unlink()
+        admin.apply_runtime_params()

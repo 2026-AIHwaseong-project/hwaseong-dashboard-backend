@@ -110,9 +110,18 @@ def load_overrides() -> dict:
 
 
 # 오버라이드가 덮기 전의 순정 기본값 — admin 콘솔이 "기본값"으로 표시할 근거.
+# baseline.* 는 2026-08-26 에 열었다 — 시뮬 엔진(05_simulate)이 기준선 상수를
+# params 가 아니라 norm_stats.json(산출물)에서 읽게 되면서, 여기 값이 산출물과
+# 달라져 있어도 서버 기동이 깨지지 않는다. 저장 → [지표 재계산](수십 초) 순서로
+# 반영되고, 재계산 전에는 화면·시뮬 모두 옛 자를 그대로 쓴다.
 BASE_VALUES = {
     "model.busTripRate": BUS_TRIP_RATE,
     "model.minFreqPerHour": MIN_FREQ_PER_H,
+    "baseline.wFreq": W_FREQ,
+    "baseline.dampExp": DAMP_EXP,
+    "baseline.miClamp": MI_CLAMP,
+    "baseline.eldCoef": ELD_COEF,
+    "baseline.covThresholdM": COV_THRESHOLD_M,
 }
 
 _OV = load_overrides()
@@ -124,6 +133,22 @@ if "model.busTripRate" in _OV:
 if "model.minFreqPerHour" in _OV:
     MIN_FREQ_PER_H = float(_OV["model.minFreqPerHour"])
     OVERRIDDEN["minFreqPerHour"] = True
+if "baseline.wFreq" in _OV:
+    W_FREQ = float(_OV["baseline.wFreq"])
+    W_COV = round(1.0 - W_FREQ, 6)      # 두 가중은 합이 1 — 한쪽만 받는 이유
+    OVERRIDDEN["wFreq"] = True
+if "baseline.dampExp" in _OV:
+    DAMP_EXP = float(_OV["baseline.dampExp"])
+    OVERRIDDEN["dampExp"] = True
+if "baseline.miClamp" in _OV:
+    MI_CLAMP = float(_OV["baseline.miClamp"])
+    OVERRIDDEN["miClamp"] = True
+if "baseline.eldCoef" in _OV:
+    ELD_COEF = float(_OV["baseline.eldCoef"])
+    OVERRIDDEN["eldCoef"] = True
+if "baseline.covThresholdM" in _OV:
+    COV_THRESHOLD_M = float(_OV["baseline.covThresholdM"])
+    OVERRIDDEN["covThresholdM"] = True
 
 
 def baked() -> dict:

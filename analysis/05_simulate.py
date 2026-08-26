@@ -62,6 +62,25 @@ base = pd.read_csv(D_DIR / "grid_metrics.csv")
 _norm_all = json.loads((D_DIR / "norm_stats.json").read_text(encoding="utf-8"))
 NORM = _norm_all["periods"]
 NORM_WE = _norm_all.get("periods_we") or None
+
+# ── 기준선 상수는 params 가 아니라 **산출물(norm_stats)에서** 읽는다 ───────────
+# params.py 는 import 시점에 관리자 오버라이드(model.*·baseline.*)를 적용한다.
+# 그 값으로 기준선을 재계산하면, 산출물(grid_metrics)이 아직 옛 상수로 구워져
+# 있는 동안 아래 기준선 assert 가 깨져 **서버가 아예 못 뜬다**(관리자 콘솔의
+# 모델 상수를 잠가 뒀던 이유 — server/admin.py 옛 SPECS 주석). 산출물이 자로
+# 쓴 값을 산출물 자신에게 물어보면 이 창이 사라진다: 재계산 전에는 옛 자,
+# 재계산(스테이징 → 04_model → 스왑) 후에는 새 자로 항상 정합하다.
+# .get 폴백은 이 키들이 없는 구버전 norm_stats(2026-08-26 이전 빌드)용이다.
+_C = _norm_all.get("constants") or {}
+W_FREQ = float(_C.get("wFreq", W_FREQ))
+W_COV = float(_C.get("wCov", W_COV))
+DAMP_EXP = float(_C.get("dampExp", DAMP_EXP))
+MI_CLAMP = float(_C.get("miClamp", MI_CLAMP))
+ELD = float(_C.get("elderlyCoef", ELD))
+COVM = float(_C.get("covThresholdM", COVM))
+MI_TH = _C.get("miThresholds", MI_TH)
+CUT = _C.get("quadCuts", CUT)
+MIN_FREQ_PER_H = float(_C.get("minFreqPerHour", MIN_FREQ_PER_H))
 _WE_METRICS = D_DIR / "grid_metrics_we.csv"
 base_we = pd.read_csv(_WE_METRICS) if _WE_METRICS.exists() else None
 

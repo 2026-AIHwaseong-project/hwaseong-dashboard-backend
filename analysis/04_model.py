@@ -115,6 +115,10 @@ def main():
         "miThresholds": MI_THRESHOLDS, "elderlyCoef": ELD_COEF,
         "normMethod": "log1p -> P3/P97 clamp min-max (pctl=lower)",
         "quadCuts": QUAD, "popWeightBounds": {"loP": loP, "hiP": hiP},
+        # 시뮬 엔진이 params.py 대신 **여기서** 읽는 상수 — 산출물과 자(尺)가
+        # 구조적으로 일치해, 관리자가 모델·기준선 상수를 저장해 둔 채 서버가
+        # 재기동돼도 기준선 assert 가 깨지지 않는다(재계산 전 = 옛 자 유지).
+        "minFreqPerHour": MIN_FREQ_PER_H, "busTripRate": _params.BUS_TRIP_RATE,
     }}
     NORM_KEY = {"wd": "periods", "we": "periods_we"}
 

@@ -167,32 +167,51 @@ SPECS = {
                               note="화면은 자체 기본 10건을 명시 전송한다 — 이 값은 API 직접 호출과 "
                                    "향후 화면 연동에 적용.",
                               applies="maxPlacements 미지정 추천 요청의 기본값"),
-    # ── 아래 둘은 **읽기 전용**이다(locked). 화면에는 값과 근거를 그대로 보여주되
-    #    콘솔로 저장할 수 없다.
+    # ── pipeline 계급 (model.*·baseline.*) — 저장 즉시가 아니라 [지표 재계산]
+    #    (약 20초, 스테이징 → 04_model → 시뮬 게이트 → 원자 스왑) 후 반영된다.
     #
-    #    저장하면 오버라이드 파일에 값이 남고, 그 파일은 var/ 바인드 마운트라
-    #    재배포를 넘어 살아남는다. 다음 기동에서 analysis/params.py 가 그 값을
-    #    읽어 상수를 덮는데, 격자 산출물(grid_metrics.csv)은 옛 값으로 구워져
-    #    있으므로 05_simulate 의 `quad 불일치` assert 에 걸려 **서버가 아예 뜨지
-    #    않는다**(restart: unless-stopped 라 크래시 루프). 서버가 죽으면 콘솔로는
-    #    되돌릴 수 없어 호스트에서 파일을 지우는 수밖에 없다.
-    #
-    #    "저장 → 재계산" 순서를 지키면 정합해지지만, 그 사이에 재기동이 한 번만
-    #    끼어도 사고가 난다. 재계산 경로가 오버라이드를 안전하게 반영하도록
-    #    정리되기 전까지는 열지 않는다.
+    #    한때 model.* 둘은 잠겨 있었다(locked) — params.py 가 import 시점에
+    #    오버라이드를 적용하는데 시뮬 엔진이 params 에서 상수를 직접 읽어서,
+    #    저장 후 재계산 전에 재기동이 끼면 옛 산출물과 새 상수가 어긋나 기준선
+    #    assert 로 서버가 못 뜨는 크래시 루프가 있었다. 2026-08-26 부터
+    #    05_simulate 가 기준선 상수를 **norm_stats.json(산출물)에서** 읽으므로
+    #    그 창이 사라졌다 — 재계산 전에는 옛 자, 후에는 새 자로 항상 정합하다.
     "model.busTripRate": dict(label="인구→통행 환산계수", unit="통행/인·일", type="float",
                               default=0.25,
-                              scope="pipeline", group="model", locked=True,
+                              scope="pipeline", group="model",
                               note="전수단 원단위 2.5 × 버스 분담률 0.10 — 가정값. "
-                                   "격자 JSON 에 구워지는 값이라 파이프라인을 다시 돌려야 "
-                                   "바뀝니다.",
-                              applies="잠재수요 KPI(flowTripsPerDay) — 읽기 전용"),
+                                   "격자 JSON 에 구워지는 값이라 [지표 재계산] 후 반영됩니다.",
+                              applies="잠재수요 KPI(flowTripsPerDay)"),
     "model.minFreqPerHour": dict(label="적정 판정 절대 하한", unit="회/h", type="float",
                                  default=2.0,
-                                 scope="pipeline", group="model", locked=True,
+                                 scope="pipeline", group="model",
                                  note="야간 상대평가 오라벨 방지 가드. 격자 산출물에 구워지는 "
-                                      "값이라 파이프라인을 다시 돌려야 바뀝니다.",
-                                 applies="사분면 적정/과잉 판정 — 읽기 전용"),
+                                      "값이라 [지표 재계산] 후 반영됩니다.",
+                                 applies="사분면 적정/과잉 판정"),
+    # ── 기준선 상수 — 수식의 자(尺). 전부 786격자 실측에서 정한 값이라(README §4)
+    #    바꾸면 need 밴드(2~25%) assert 가 재계산을 막을 수 있다 — 그게 안전장치다.
+    #    wCov 는 따로 받지 않는다: 두 가중은 합이 1 이라 wFreq 가 정하면 따라온다.
+    "baseline.wFreq": dict(label="공급지수 운행빈도 가중", unit="", type="float",
+                           default=0.78, scope="pipeline", group="baseline",
+                           note="접근성 가중(wCov)은 1 − 이 값으로 자동 결정됩니다.",
+                           applies="공급지수 S = wFreq·정규화(운행빈도) + wCov·커버리지"),
+    "baseline.dampExp": dict(label="빈 땅 MI 감쇠 지수", unit="", type="float",
+                             default=0.65, scope="pipeline", group="baseline",
+                             note="인구 50명 미만 임야 183칸의 가짜 사각지대를 걷어낸 실측 근거.",
+                             applies="MI = (zD−zS) × (D/dRef)^이 값"),
+    "baseline.miClamp": dict(label="MI 절대값 상한", unit="±", type="float",
+                             default=2.6, scope="pipeline", group="baseline",
+                             note="극단값 하나가 색 스케일을 무너뜨리지 않게 자릅니다.",
+                             applies="MI 클램프 · 지도 색 스케일"),
+    "baseline.eldCoef": dict(label="우선순위 고령 가중", unit="", type="float",
+                             default=1.6, scope="pipeline", group="baseline",
+                             note="회귀 학습값이 아니라 정책 결정값입니다. 근거는 README §4.",
+                             applies="우선순위 = MI × (0.35+인구가중) × (1 + 이 값 × 고령비)"),
+    "baseline.covThresholdM": dict(label="커버리지 임계(m)", unit="m", type="float",
+                                   default=600.0, scope="pipeline", group="baseline",
+                                   note="최근접 정류장 거리 중앙값 392m 실측에서 결정. "
+                                        "수단 배지 컷(0.15/0.50)의 미터 환산이 함께 바뀝니다.",
+                                   applies="커버리지 = clip(1 − 거리/이 값, 0.05, 1)"),
 }
 
 # 기본값 동기화 — SPECS 의 리터럴이 params.py 와 갈라지지 않게 정본에서 덮는다.
@@ -204,6 +223,7 @@ _DEFAULT_SRC = {
     "cost.defaultBudget": PARAMS.DEFAULT_BUDGET,
     "model.busTripRate": PARAMS.BASE_VALUES["model.busTripRate"],
     "model.minFreqPerHour": PARAMS.BASE_VALUES["model.minFreqPerHour"],
+    **{k: v for k, v in PARAMS.BASE_VALUES.items() if k.startswith("baseline.")},
 }
 for _k, _v in _DEFAULT_SRC.items():
     SPECS[_k]["default"] = _v
@@ -212,15 +232,11 @@ for _k, _v in _DEFAULT_SRC.items():
 #   (attr, label, note)
 # 값은 화면이 왼쪽에 이미 보여준다. 여기에는 **왜 그 값인지**만 적는다 —
 # 앞에 숫자를 또 쓰면 한 행에 같은 수가 두 번 나온다.
+# 편집 가능한 기준선 상수는 SPECS(baseline.*)로 승격됐다(2026-08-26). 여기 남는
+# 것은 파생값(wCov = 1−wFreq)과 다른 단계에 결합돼 열 수 없는 값뿐이다.
 BASELINE_DISPLAY = [
-    ("W_FREQ", "공급지수 운행빈도 가중", "팀 설계값. 바꾸려면 새 기준선 발행(재계산+재검증)이 필요합니다."),
-    ("W_COV", "공급지수 접근성 가중", "운행빈도 가중과 합이 1 입니다."),
-    ("DAMP_EXP", "빈 땅 MI 감쇠 지수", "인구 50명 미만 임야 183칸의 가짜 사각지대를 걷어낸 실측 근거."),
-    ("MI_CLAMP", "MI 절대값 상한", "극단값이 색 스케일을 무너뜨리지 않게 자릅니다."),
-    ("ELD", "우선순위 고령 가중", "회귀 학습값이 아니라 정책 결정값입니다. 근거는 README §4."),
-    ("COVM", "커버리지 임계(m)", "최근접 정류장 거리 중앙값 392m 실측에서 결정했습니다."),
+    ("W_COV", "공급지수 접근성 가중", "따로 정하지 않습니다 — 운행빈도 가중과 합이 1 이라 자동 결정."),
     ("WALK", "승하차 안분 반경(m)", "03_join 설계와 맞물려 있어 바꾸지 않습니다."),
-    ("MIN_FREQ_PER_H", "적정 판정 하한(회/h)", "위 '모델 상수' 의 적정 판정 절대 하한과 같은 값입니다."),
     ("HEADWAY_MULT", "(현재 적용) 증편 배수", "배차 영향력의 증편 배수가 실제로 주입된 값입니다."),
 ]
 
@@ -582,8 +598,15 @@ def _pipeline_effective(key: str):
     a = meta.get("assumptions") or {}
     if key == "model.busTripRate":
         return (a.get("busTripRate") or {}).get("value")
-    if key == "model.minFreqPerHour":
-        return (a.get("minFreqPerHour") or {}).get("value")
+    # 나머지는 시뮬 엔진 속성에서 읽는다 — 05_simulate 가 norm_stats(산출물)의
+    # 상수를 쓰므로 "산출물에 실제로 구워진 값"과 항상 같다.
+    sim = (_ctx["DATA"] or {}).get("sim")
+    attr = {"model.minFreqPerHour": "MIN_FREQ_PER_H", "baseline.wFreq": "W_FREQ",
+            "baseline.dampExp": "DAMP_EXP", "baseline.miClamp": "MI_CLAMP",
+            "baseline.eldCoef": "ELD", "baseline.covThresholdM": "COVM"}.get(key)
+    if sim is not None and attr:
+        v = getattr(sim, attr, None)
+        return float(v) if v is not None else None
     return None
 
 
