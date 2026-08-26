@@ -22,9 +22,16 @@
 | 7 | `/api/v1/simulations` | POST | 배치 시뮬레이션 ★ |
 | 8 | `/api/v1/recommendations` | POST | AI 추천 배치안 ★ |
 | 9 | `/api/v1/reports/draft` | POST | 보고서 초안 생성 (AI 프록시) |
-| 10 | `/api/v1/providers` | GET | AI 프로바이더·모델 목록 |
-| 11 | `/api/v1/scenarios` | POST | 시나리오 공유 저장 (공유 링크의 실체) |
-| 12 | `/api/v1/scenarios/{id}` | GET | 공유 시나리오 조회 |
+| 10 | `/api/v1/chat` | POST | AI 채팅 — 화면 질문 응답 · 보고서 초안 수정, SSE 스트리밍 |
+| 11 | `/api/v1/providers` | GET | AI 프로바이더·모델 목록 |
+| 12 | `/api/v1/scenarios` | POST | 시나리오 공유 저장 (공유 링크의 실체) |
+| 13 | `/api/v1/scenarios/{id}` | GET | 공유 시나리오 조회 |
+
+> ⚠️ 이 목차는 2026-08-27 기준 13개로 맞췄지만, **아래 각 절의 상세 스펙(요청·응답 예시)은
+> 여전히 2026-08-13 시점**입니다 — `daytype`(평일/주말) 파라미터가 `/grid`·`/priorities`·
+> `/simulations`·`/recommendations`·`/scenarios`·`/reports/draft` 에 추가된 것과 `/chat` 의
+> 상세 스펙은 아직 아래에 반영되지 않았습니다. 지금 정확한 요청 스키마는 `server/main.py` 의
+> Pydantic 모델(`SimRequest`·`RecommendRequest`·`ChatRequest` 등)을 보세요.
 
 ---
 
