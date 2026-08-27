@@ -1377,6 +1377,10 @@ def revoke_grid_override(req: GridOverrideRevokeRequest, _w=Depends(require_writ
 
 
 class RefreshRequest(BaseModel):
+    # extra="allow" — 모르는 필드를 보존한다. 기본값(ignore)이면 dryRun 같은 오해
+    # 필드가 조용히 사라져 "무시됐다"는 인상만 남는다. 받아 두고 명시적으로 막는다.
+    model_config = {"extra": "allow"}
+
     steps: list = ["reload"]
     reason: str = ""
     actor: str = "admin"
@@ -1420,6 +1424,35 @@ async def start_refresh(req: RefreshRequest, _w=Depends(require_write)):
         raise HTTPException(400, f"steps 에 알 수 없는 단계가 있습니다: {bad} (허용: {sorted(valid)})")
     if not steps:
         raise HTTPException(400, "steps 가 비어 있습니다.")
+
+    # ── 단계 의존성은 **서버가 보정한다** (2026-08-27) ────────────────────────
+    # 업로드 경로에는 이 방어가 있었는데(위 주석) 일반 경로는 클라이언트가 보낸
+    # 그대로 돌렸다. 그래서 `model` 만 돌리고 `load` 를 빼면 이런 일이 났다:
+    #   04_model 이 grid_metrics.csv 를 새 상수로 다시 굽는다 → 그런데
+    #   server/static/*.json 은 옛 세대 그대로 → reload 가 그 옛 JSON 을 읽는다
+    #   → **저장·이력·잡은 전부 성공인데 화면 수치만 안 바뀐다.**
+    # 독립 검증에서 baseline.eldCoef 를 1.6→5.0 으로 올리고도 우선순위가 소수점
+    # 4자리까지 동일했던 것이 이 경로였다. db 단계도 static JSON 을 적재하므로
+    # load 없이 돌리면 옛 세대를 DB 에 넣어 기준일이 되레 후퇴한다(같은 검증의
+    # '주의 2'). 어느 쪽도 사람이 눈치채기 어려우니 조합 자체를 막는다.
+    auto = []
+    # 업로드 경로는 위에서 서버가 이미 스텝을 정했다 — 특히 **예행(dry-run)은
+    # load 를 일부러 뺀다**(계약 JSON 을 만들지 않아야 라이브가 무변경이다).
+    # 여기서 보정하면 그 설계를 되레 깨뜨린다.
+    if not req.uploadId:
+        if ("join" in steps or "model" in steps or "db" in steps) and "load" not in steps:
+            steps.append("load")
+            auto.append("load")
+        # 실행 순서도 서버가 정한다 — 뒤섞어 보내도 파이프라인 순서는 하나다.
+        order = ["join", "model", "validate", "load", "db", "reload"]
+        steps = [x for x in order if x in set(steps)]
+
+    # dryRun 은 업로드 검증 전용이다. 일반 재계산에 얹어 보내면 예행인 줄 알고
+    # 눌렀는데 라이브가 도는 형태가 된다 — 조용히 무시하지 말고 막는다.
+    extra = getattr(req, "model_extra", None) or {}
+    if extra.get("dryRun") and not req.uploadId:
+        raise HTTPException(400, "dryRun 은 업로드 검증(uploadId + apply:false) 전용입니다 — "
+                                 "일반 재계산에는 예행이 없습니다. 라이브가 그대로 돕니다.")
     if "db" in steps and not os.environ.get("DATABASE_URL"):
         raise HTTPException(400, "DATABASE_URL 이 없어 db 단계를 실행할 수 없습니다.")
 
@@ -1428,10 +1461,13 @@ async def start_refresh(req: RefreshRequest, _w=Depends(require_write)):
     JOB["log"].clear()
     _append_history({"kind": "refresh.start", "jobId": JOB["id"], "steps": steps,
                      "reason": req.reason, "actor": req.actor,
-                     "uploadId": req.uploadId, "apply": do_apply})
+                     "uploadId": req.uploadId, "apply": do_apply,
+                     "autoAdded": auto or None})
     asyncio.get_running_loop().create_task(
         _run_refresh(steps, req.reason, req.actor, upload_id=req.uploadId, apply=do_apply))
-    return {"ok": True, "jobId": JOB["id"], "steps": steps, "dryRun": not do_apply}
+    return {"ok": True, "jobId": JOB["id"], "steps": steps, "dryRun": not do_apply,
+            # 서버가 채워 넣은 단계 — 부른 쪽이 "내가 안 보낸 게 돌았다"를 알 수 있게.
+            "autoAddedSteps": auto}
 
 
 class UploadRequest(BaseModel):

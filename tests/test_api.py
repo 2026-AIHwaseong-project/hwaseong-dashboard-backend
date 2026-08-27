@@ -1129,3 +1129,44 @@ def test_chat_multi_actions(c, monkeypatch):
     # ⑦ 할 일이 없으면 빈 배열 + action none
     j = ask({"reply": "설명만", "actions": [{"type": "none"}]})
     assert j["actions"] == [] and j["action"]["type"] == "none"
+
+
+def test_refresh_step_dependencies(c, adm, monkeypatch):
+    """재계산 단계 의존성 보정(2026-08-27) — 독립 검증 P0-3·주의 2·주의 3.
+
+    model 만 돌리고 load 를 빼면 grid_metrics 는 새 상수로 다시 구워지는데
+    server/static/*.json 은 옛 세대라, reload 가 옛 JSON 을 읽어 **잡은 성공인데
+    화면 수치만 안 바뀐다.** db 도 같은 이유로 옛 세대를 적재해 기준일이 후퇴한다.
+    사람이 눈치채기 어려운 조합이라 서버가 보정한다."""
+    admin, calls = adm
+
+    def ask(body):
+        r = c.post("/api/v1/admin/refresh", json=body)
+        return r, (r.json() if r.status_code == 200 else None)
+
+    # ① model → load 자동 추가 + 순서 정규화
+    r, j = ask({"steps": ["reload", "model"], "reason": "의존성"})
+    assert r.status_code == 200, r.text
+    assert j["steps"] == ["model", "load", "reload"]
+    assert j["autoAddedSteps"] == ["load"]
+    assert calls[-1]["steps"] == ["model", "load", "reload"]
+
+    # ② db 도 load 를 요구한다 (계약 JSON 을 적재하므로).
+    #    db 단계는 DATABASE_URL 이 있어야 접수되므로 값만 넣는다 — 실제 적재는
+    #    adm 픽스처가 _run_refresh 를 대역으로 바꿔 두어 일어나지 않는다.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
+    _, j = ask({"steps": ["db"], "reason": "의존성"})
+    assert "load" in j["steps"] and j["steps"].index("load") < j["steps"].index("db")
+
+    # ③ 이미 온전한 조합은 건드리지 않는다
+    _, j = ask({"steps": ["join", "model", "validate", "load", "reload"], "reason": "온전"})
+    assert j["autoAddedSteps"] == []
+
+    # ④ reload 단독은 산출물을 다시 굽지 않으므로 보정 대상이 아니다
+    _, j = ask({"steps": ["reload"], "reason": "화면 반영"})
+    assert j["steps"] == ["reload"] and j["autoAddedSteps"] == []
+
+    # ⑤ 일반 재계산에 dryRun 을 얹으면 400 — 예행인 줄 알고 눌렀는데 라이브가
+    #    도는 형태를 막는다(조용한 무시가 가장 나쁘다)
+    r, _ = ask({"steps": ["model"], "dryRun": True, "reason": "예행 오해"})
+    assert r.status_code == 400 and "dryRun" in r.json()["detail"]
