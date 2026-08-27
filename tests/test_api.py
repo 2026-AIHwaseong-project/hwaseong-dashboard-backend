@@ -1080,3 +1080,52 @@ def test_premium_model_gate(c, monkeypatch):
     # ADMIN_TOKEN 미설정이면 게이트도 열린다
     monkeypatch.delenv("ADMIN_TOKEN")
     assert c.post("/api/v1/chat", json=body).status_code == 200
+
+
+def test_chat_multi_actions(c, monkeypatch):
+    """복수 액션 계약(2026-08-27) — actions 배열을 그대로 싣되 화이트리스트로 거른다.
+    action(단수)은 구버전 화면 호환으로 첫 액션을 함께 보낸다."""
+    import json as _json
+    import server.main as sm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+
+    def ask(payload):
+        monkeypatch.setattr(sm, "_acall_ai", _fake_acall(_json.dumps(payload)))
+        return c.post("/api/v1/chat", json={
+            "provider": "claude", "messages": [{"role": "user", "content": "hi"}]}).json()
+
+    # ① 배열 그대로 + 단수 호환
+    j = ask({"reply": "ok", "actions": [{"type": "period", "value": "night"},
+                                        {"type": "layer", "value": "supply"}]})
+    assert [a["type"] for a in j["actions"]] == ["period", "layer"]
+    assert j["action"]["type"] == "period"
+
+    # ② 새 액션들이 통과하는가 (1·2단계에서 연 것)
+    j = ask({"reply": "ok", "actions": [{"type": "daytype", "value": "we"},
+                                        {"type": "budget", "value": 50},
+                                        {"type": "place", "tool": "drt",
+                                         "cellId": "다사6707", "count": 2}]})
+    assert [a["type"] for a in j["actions"]] == ["daytype", "budget", "place"]
+
+    # ③ 화이트리스트 밖은 버리고, none 도 실행 목록에서 뺀다
+    j = ask({"reply": "ok", "actions": [{"type": "eval", "code": "alert(1)"},
+                                        {"type": "none"},
+                                        {"type": "select", "cellId": "다사6707"}]})
+    assert [a["type"] for a in j["actions"]] == ["select"]
+
+    # ④ nav 뒤는 자른다 — 페이지를 떠나므로 실행되지 않는다
+    j = ask({"reply": "ok", "actions": [{"type": "nav", "page": "simulation"},
+                                        {"type": "recommend"}]})
+    assert [a["type"] for a in j["actions"]] == ["nav"]
+
+    # ⑤ 상한 4개
+    j = ask({"reply": "ok", "actions": [{"type": "period", "value": "am"}] * 6})
+    assert len(j["actions"]) == 4
+
+    # ⑥ 구버전 형식(action 단수)도 받는다
+    j = ask({"reply": "ok", "action": {"type": "recommend"}})
+    assert [a["type"] for a in j["actions"]] == ["recommend"]
+
+    # ⑦ 할 일이 없으면 빈 배열 + action none
+    j = ask({"reply": "설명만", "actions": [{"type": "none"}]})
+    assert j["actions"] == [] and j["action"]["type"] == "none"

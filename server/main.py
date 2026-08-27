@@ -2134,31 +2134,57 @@ _CHAT_RULES = """당신은 화성시 버스 수요·공급 미스매칭 대시�
   요청받으면 왜 못 하는지 설명하세요.
 
 ■ 응답 형식 — JSON 만, 마크다운 코드블록 없이
-{"reply": "답변 문장", "action": {"type": "none"}}
+{"reply": "답변 문장", "actions": [{"type": "none"}]}
 
-■ action — 사용자가 무언가를 보거나 시키고 싶어 하면 **반드시** 채웁니다.
+■ actions — 사용자가 무언가를 보거나 시키고 싶어 하면 **반드시** 채웁니다.
+  **배열입니다.** 한 문장이 두세 가지를 요구하면 순서대로 담으세요(최대 4개).
+  예: "심야로 바꾸고 공급 기준으로 보여줘"
+      → [{"type":"period","value":"night"},{"type":"layer","value":"supply"}]
+  할 일이 없으면 [{"type":"none"}].
+
+  ● 어느 화면에서나
   {"type":"period","value":"am|day|pm|night"}       시간대 전환
+  {"type":"daytype","value":"wd|we"}                평일/주말 전환
   {"type":"layer","value":"mi|demand|supply|flow"}  지도 색 기준 전환
-  {"type":"show","query":"향남읍"}                  읍면동·격자ID·버스번호·정류장으로 이동
-  {"type":"recommend"}                              AI 추천 배치안 계산(시뮬레이션 화면 전용)
-  {"type":"nav","page":"dashboard|simulation","query":"선택","after":{...선택, 도착 후 이어 할 action 1개}}
+  {"type":"report"}                                 AI 보고서 초안 만들기
+  {"type":"nav","page":"dashboard|simulation","query":"선택","after":[...도착 후 이어 할 actions]}
                                                      다른 화면으로 이동
 
-  "보여줘" · "찾아줘" · "이동해줘" · "어디야?" · "~로 바꿔줘" · "눌러줘/계산해줘/추천해줘" 는
-  전부 요청입니다. 말로 "했습니다" 라고만 하고 action 을 none 으로 두면 화면은 그대로라
-  거짓말이 됩니다 — 하겠다고 말했으면 action 을 반드시 채우세요.
-  반대로 단순한 설명 질문("MI가 뭐야?")에는 {"type":"none"} 입니다.
+  ● 대시보드 화면
+  {"type":"show","query":"향남읍"}                  읍면동·버스번호·정류장 이름으로 이동
+  {"type":"select","cellId":"다사6707"}             격자 열기(노선·정류장 프로파일까지)
+
+  ● 시뮬레이션 화면
+  {"type":"place","tool":"stop|drt|freq","cellId":"다사6707","count":1}   수단 배치(최대 20)
+  {"type":"undo"}                                   마지막 배치 되돌리기
+  {"type":"reset"}                                  배치 전부 지우기(사용자 확인창이 뜹니다)
+  {"type":"budget","value":50}                      예산 한도(억 원 단위)
+  {"type":"strategy","value":"efficiency|equity|balance|quick"}  추천 목적 바꿔 다시 계산
+  {"type":"scope","value":"봉담읍"}                 추천 범위 좁히기(빈 문자열이면 화성시 전체)
+  {"type":"recommend"}                              AI 추천 배치안 계산
+
+  ⚠️ 배치(place)는 **사용자가 말한 곳에 놓기만** 합니다. 어디에 놓는 것이 좋은지를
+  **고르는 일은 recommend(최적화 알고리즘)** 가 합니다 — "어디에 놓을까?" 라고
+  물으면 place 로 아무 데나 놓지 말고 recommend 를 쓰거나 우선순위 Top 을 안내하세요.
+  ⚠️ cellId 는 <사실> 에 나온 실제 격자 ID 만 씁니다. 지어내면 아무 일도 안 일어납니다.
+  ⚠️ nav 는 페이지를 실제로 떠나므로 **배열에서 마지막**이어야 하고, 도착해서 할
+  일은 nav.after 에 배열로 실으세요.
+
+  "보여줘" · "찾아줘" · "이동해줘" · "어디야?" · "~로 바꿔줘" · "놓아줘/배치해줘" ·
+  "눌러줘/계산해줘/추천해줘" 는 전부 요청입니다. 말로 "했습니다" 라고만 하고 actions 를
+  none 으로 두면 화면은 그대로라 거짓말이 됩니다 — 하겠다고 말했으면 반드시 채우세요.
+  반대로 단순한 설명 질문("MI가 뭐야?")에는 [{"type":"none"}] 입니다.
 
   **<지금 화면> 의 `이화면에서_가능` 목록에 없는 걸 요청받으면**, "화면 데이터에
   없습니다" 라고 답하지 마세요 — 그건 그 화면에 없을 뿐 서비스엔 있는 기능입니다.
   대신 nav 로 필요한 화면부터 옮기세요:
-    - 지금 화면에서 바로 되면(목록에 있으면) 해당 action 하나만.
-    - 다른 화면의 기능이면 nav 를 쓰고, 옮기자마자 이어서 할 일이 있으면 그 action 을
-      nav.after 에 실으세요(예: 시뮬레이션 화면으로 옮기며 AI 추천도 같이 —
-      {"type":"nav","page":"simulation","after":{"type":"recommend"}}).
+    - 지금 화면에서 바로 되면(목록에 있으면) 해당 actions 를 그대로.
+    - 다른 화면의 기능이면 nav 를 쓰고, 옮기자마자 이어서 할 일은 nav.after 에 실으세요
+      (예: 시뮬레이션으로 옮기며 예산 50억으로 추천 —
+      {"type":"nav","page":"simulation","after":[{"type":"budget","value":50},{"type":"recommend"}]}).
     - nav.query 는 dashboard 로 갈 땐 읍면동·격자ID 등 검색어, simulation 으로 갈 땐
       <사실> 에 나온 실제 격자ID(예: "다사6707")만 쓰세요 — 지어내면 그 격자를 못 찾습니다.
-    - 이미 그 화면이면 nav 를 쓰지 말고 그 화면의 action 을 바로 쓰세요."""
+    - 이미 그 화면이면 nav 를 쓰지 말고 그 화면의 actions 를 바로 쓰세요."""
 
 _CHAT_REPORT_RULES = """당신은 화성시 버스 대시보드의 보고서 편집기입니다.
 사용자의 지시대로 **현재 초안**을 고쳐 씁니다.
@@ -2288,6 +2314,42 @@ def _chat_unavailable(reason: str) -> dict:
 _CHAT_BUSY = ("지금 AI 요청이 몰려 있습니다. 잠시 뒤 다시 보내 주세요.")
 
 
+# 화면이 실행할 수 있는 액션 — **여기 없는 type 은 조용히 버린다.**
+# 프론트도 같은 화이트리스트로 한 번 더 거른다(chat.js runAction) — 두 겹인 이유는
+# 계층마다 아는 것이 달라서다: 서버는 계약을, 화면은 그 화면에 그 기능이 있는지를 안다.
+_ACTION_TYPES = {
+    "period", "daytype", "layer", "show", "select", "place", "undo", "reset",
+    "budget", "strategy", "scope", "recommend", "report", "nav", "none",
+}
+MAX_ACTIONS = 4     # chat.js 의 같은 상한과 맞춘다
+
+
+def _sane_actions(out: dict) -> list:
+    """모델 응답에서 실행 가능한 액션 목록만 추린다.
+
+    actions(배열)를 우선 보고, 없으면 action(단수)을 배열로 감싼다 — 프롬프트를
+    바꿔도 모델이 옛 형식으로 답하는 일이 있어서 둘 다 받는다. none 은 버린다
+    (화면에서 할 일이 없다는 뜻이라 실행 목록에 남길 이유가 없다).
+    """
+    raw = out.get("actions")
+    if not isinstance(raw, list):
+        one = out.get("action")
+        raw = [one] if isinstance(one, dict) else []
+    acts = []
+    for a in raw:
+        if not isinstance(a, dict) or a.get("type") not in _ACTION_TYPES:
+            continue
+        if a.get("type") == "none":
+            continue
+        acts.append(a)
+        # nav 는 페이지를 떠나므로 뒤는 실행되지 않는다 — 여기서 자른다.
+        if a["type"] == "nav":
+            break
+        if len(acts) >= MAX_ACTIONS:
+            break
+    return acts
+
+
 def _chat_result(text: str, provider: str, model: str, mode: str,
                  base_draft: Optional[dict] = None) -> dict:
     """모델이 낸 원문 → 화면이 쓰는 최종 응답. 스트리밍·비스트리밍이 같이 씁니다."""
@@ -2296,15 +2358,14 @@ def _chat_result(text: str, provider: str, model: str, mode: str,
         # 형식은 틀렸어도 사람이 읽을 말은 왔을 수 있으니 통째로 버리지 않습니다.
         # 다만 JSON 조각이 화면에 노출되면 안 되므로 첫 중괄호 앞까지만 씁니다.
         plain = text.split("{", 1)[0].strip() or "AI 응답을 해석하지 못했습니다."
-        return {"reply": plain[:1500], "action": {"type": "none"}, "ok": True,
+        return {"reply": plain[:1500], "action": {"type": "none"}, "actions": [], "ok": True,
                 "provider": _PROVIDERS[provider]["label"], "model": model}
 
-    act = out.get("action") or {"type": "none"}
-    if not isinstance(act, dict) or act.get("type") not in (
-        "period", "layer", "show", "recommend", "nav", "none"
-    ):
-        act = {"type": "none"}
-    res = {"reply": out["reply"], "action": act, "ok": True,
+    actions = _sane_actions(out)
+    res = {"reply": out["reply"], "actions": actions,
+           # action(단수)도 함께 실어 구버전 화면과 호환합니다 — 첫 액션만 나갑니다.
+           "action": actions[0] if actions else {"type": "none"},
+           "ok": True,
            "provider": _PROVIDERS[provider]["label"], "model": model}
     if mode == "report" and isinstance(out.get("draft"), dict):
         # 프론트는 돌려받은 sections 로 **통째 교체**한다(report.js 의 onDraft).
