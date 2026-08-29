@@ -1437,6 +1437,152 @@ REPORT_SECTION_NAMES = {
 XLSX_SHEET_NAME_MAX = 31   # 엑셀 시트명 상한. 넘으면 프론트가 조용히 자르고 (2) 를 붙인다.
 
 
+# ─── 보고서 시스템 프롬프트 ─────────────────────────────────────────────────
+#
+# README §2 가 "미구현 백로그"로 적어 둔 그 문서다. user 메시지 한 통에 지시문과
+# 데이터를 모두 이어붙이던 것을 둘로 나눈다 — **고정부(문체·근거·해석 기준·구성)는
+# system 으로 올리고, 매번 바뀌는 값(시간대·KPI·우선순위)만 user 로 보낸다.**
+#
+# 이렇게 나누는 이유가 둘이다.
+#   ① 문체·구성이 요청마다 흔들리던 것을 고정한다(같은 지시가 매번 같은 자리에 있다).
+#   ② 프롬프트 캐시가 걸린다. 캐시는 **바이트가 완전히 같을 때만** 맞으므로 날짜·
+#      시간대처럼 매번 달라지는 값을 여기 넣으면 안 된다 — 그 값들은 user 쪽에 있다.
+#
+# ⚠️ 이 문자열을 고치면 캐시가 통째로 미스난다(그게 정상이다 — 지시가 달라졌으니).
+REPORT_SYSTEM_PROMPT = """당신은 지방자치단체 교통정책과의 정책 보고서를 작성하는 실무 담당자입니다.
+대중교통 수요·공급 분석 결과를 받아 결재용 검토 보고서 초안을 작성합니다.
+
+[문체]
+- 공문서 문체를 사용합니다. '~하였다', '~로 확인되었다', '~을 제안한다'.
+- 구어체, 감탄사, 이모지, 마케팅 표현을 쓰지 않습니다.
+- 한 문단은 3~4문장을 넘기지 않습니다.
+
+[근거]
+- 제공된 수치만 사용합니다. 주어지지 않은 값을 지어내지 않습니다.
+- 모든 주장에는 수치 근거를 붙입니다. "수요가 많다"가 아니라
+  "수요지수 72로 상위 5% 수준이다" 처럼 씁니다.
+- 수치는 천 단위 콤마를 넣고 단위를 명시합니다(개, 통행/일, 원).
+- 추정값에는 '추정', '~로 산정되었다' 처럼 불확실성을 드러냅니다.
+- **격자 크기와 사업비 단가는 user 메시지에 적힌 값을 그대로 씁니다.** 실제로
+  격자를 '500m×500m'로, 단가 1억8천만 원을 '18억 원'으로 지어낸 사례가 있었습니다.
+  금액은 단가 × 건수로만 계산하고 단위(억/만)를 임의로 바꾸지 않습니다.
+
+[지표 해석 기준]
+- MI(미스매칭 지수) = clip( (z(수요) − z(공급)) × clip(수요/dRef, 0, 1)^0.65, −2.6, +2.6 ).
+  양수가 클수록 공급이 부족합니다.
+- 고수요·저공급(need) = 노선 증차 또는 정류장 신설 대상.
+- 저수요·저공급(drt) = 정규 노선보다 수요응답형(똑버스)이 적합.
+- 저수요·고공급(over) = 배차 재배분 등 효율화 검토 대상.
+- 고령인구비가 높은 격자는 이동권 보장 관점에서 우선순위를 높입니다.
+
+[구성]
+sections 는 요청받은 key 를 그대로 쓰며 heading 은 다음을 따릅니다.
+  summary → '1. 검토 개요'
+  status  → '2. 현황 분석'
+  problem → '3. 도출된 문제점'
+  plan    → '4. 개선 방안'
+  effect  → '5. 기대 효과'
+  next    → '6. 향후 조치 계획'
+body 의 문단 구분은 개행문자 하나로만 합니다.
+bullets 에는 근거 수치를 반드시 포함시킵니다.
+
+[표]
+- 입력으로 받은 우선순위·배치·효과 데이터를 표로 정리합니다.
+- title 은 엑셀 시트명이 되므로 31자 이내로 짓습니다.
+- rows 의 각 행 길이는 columns 길이와 같아야 합니다.
+
+응답은 JSON 만 냅니다 — 마크다운 코드블록으로 감싸지 않습니다."""
+
+
+def _fact_pool(*objs) -> set:
+    """프롬프트에 실제로 실린 수치를 전부 모은다 — 산문 대조의 기준 집합.
+
+    중첩 dict/list 를 훑어 숫자를 담고, 사람이 흔히 쓰는 단위 환산형(억·만)도
+    함께 넣는다. 예: 180,000,000 원이 입력이면 '1.8억' 도 정직한 표현이라
+    18(억)·18000(만)을 허용값에 포함시켜야 한다.
+    """
+    pool: set = set()
+
+    def add(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return
+        if f != f or f in (float("inf"), float("-inf")):
+            return
+        n = int(round(abs(f)))
+        pool.add(n)
+        for unit in (10_000, 100_000_000):          # 만·억 환산
+            if n >= unit and n % unit == 0:
+                pool.add(n // unit)
+        # 소수 자릿수 확장은 **작은 값에만** 건다(비율·MI 를 '3.8%'·'1.82' 로 쓰는
+        # 경우). 금액에까지 걸면 180,000,000 × 10 = 18억 이 허용값이 되어, 정확히
+        # 이 가드가 잡아야 할 '1.8억을 18억으로 적은 오류'를 통과시킨다.
+        if abs(f) < 1000:
+            pool.add(int(abs(f) * 100))
+            pool.add(int(abs(f) * 10))
+
+    def walk(o):
+        if isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+        elif isinstance(o, (int, float)) and not isinstance(o, bool):
+            add(o)
+
+    for o in objs:
+        walk(o)
+    # 연도·백분율·한 자리 수 등 문장에 늘 나오는 값은 대조에서 뺀다(오탐 방지)
+    # 문장에 늘 나오는 작은 수·연도는 대조에서 뺀다(오탐 방지). 단위가 붙은
+    # 수치는 환산값으로 대조하므로 이 예외에 걸리지 않는다 — '18억'은 18 이 아니라
+    # 1,800,000,000 으로 비교된다.
+    pool |= set(range(0, 101)) | {2025, 2026, 2027}
+    # 화면·문서가 늘 쓰는 물리 상수(격자·도보권·커버리지 임계)를 함께 허용한다
+    pool |= {786, 1000, 800, 600, 510, 300}
+    return pool
+
+
+# 단위가 붙은 수치만 본다 — 맨숫자는 순번·문장 표현이 섞여 오탐이 너무 많다
+# (금액·거리는 틀리면 결재 문서가 틀리는 자리라 이 둘만 좁게 겨눈다).
+_NUM_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(억\s*원|만\s*원|억|만|km|킬로미터|m|미터)")
+_UNIT_MUL = {"억원": 100_000_000, "억": 100_000_000, "만원": 10_000, "만": 10_000,
+             "km": 1000, "킬로미터": 1000, "m": 1, "미터": 1}
+
+
+def _suspect_numbers(text: str, pool: set, limit: int = 6) -> list:
+    """본문에서 입력에 없는 수치를 찾아낸다.
+
+    _validate_draft 는 섹션 구조·표 행 길이만 봤고 **산문 속 숫자는 아무도 안
+    봤다.** 실제로 격자를 '500m×500m'(실제 1km)로, 단가 1.8억을 '18억 원'으로
+    적은 초안이 그대로 화면에 나갔다. 여기서 잡아 초안에 표시한다 —
+    **문장을 고치지는 않는다.** 모델이 쓴 문장을 서버가 임의로 손대면 그게 더
+    위험하고, 담당자가 검토하는 문서이므로 '어디가 의심스러운지'를 알리는 것이
+    맞다(보고서 자체를 버리지도 않는다 — 나머지 내용은 정상이다).
+    """
+    bad, seen = [], set()
+    for m in _NUM_RE.finditer(text or ""):
+        raw, unit = m.group(1), re.sub(r"\s+", "", m.group(2))
+        try:
+            v = float(raw.replace(",", ""))
+        except ValueError:
+            continue
+        n = int(round(v * _UNIT_MUL.get(unit, 1)))
+        # 환산값으로만 대조한다 — 원본 숫자(18)까지 보면 '18억 원'이 0~100 예외에
+        # 걸려 통과해 버린다(실제로 그 사고가 있었다).
+        if n in pool:
+            continue
+        tok = raw + unit
+        if tok in seen:
+            continue
+        seen.add(tok)
+        bad.append(tok)
+        if len(bad) >= limit:
+            break
+    return bad
+
+
 def _validate_draft(draft: dict, req_sections: list) -> dict:
     """모델이 낸 초안을 계약에 맞춘다. **이 함수가 없으면 아무 검증도 없다.**
 
@@ -1746,7 +1892,13 @@ async def _astream_ai(provider: str, model: str, system: Optional[str],
     if provider == "claude":
         kw = {"model": model, "max_tokens": max_tokens, "messages": messages}
         if system:
-            kw["system"] = system
+            # 프롬프트 캐시 — 고정 지시문(보고서 시스템 프롬프트·챗 규칙+KB)은 매
+            # 요청 같은 바이트라 캐시가 걸린다. 512토큰부터 유효하고, 짧으면 그냥
+            # 무시된다(오류가 아니다). 캐시가 안 먹는 것 같으면 응답의
+            # usage.cache_read_input_tokens 를 보라 — 0 이면 고정부에 매번 바뀌는
+            # 값이 섞인 것이다(한 글자만 달라도 통째로 미스난다).
+            kw["system"] = [{"type": "text", "text": system,
+                             "cache_control": {"type": "ephemeral"}}]
         async with client.messages.stream(**kw) as stream:
             # text_stream 은 텍스트 블록만 흘려 줍니다. 최신 모델이 앞에 붙이는
             # ThinkingBlock 을 직접 걸러낼 필요가 없어졌습니다(예전 버그 자리).
@@ -1931,10 +2083,7 @@ async def draft_report(req: ReportRequest, authorization: str = Header(default="
 {rec_block}
 {weekend_note}
 
-**위에 주어진 수치만 사용하십시오. 제공된 데이터에 없는 수치는 어떤 경우에도 쓰지 마십시오.**
-특히 **격자 크기와 사업비 단가는 위에 적힌 값을 그대로** 쓰십시오 — 실제로 격자를
-'500m×500m'로, 단가 1.8억 원을 '18억 원'으로 지어낸 사례가 있었습니다. 금액은
-위 단가와 배치 건수의 곱으로만 계산하고, 단위(억/만)를 임의로 바꾸지 마십시오.
+**위에 주어진 수치만 사용하십시오.** (문체·근거·구성 규칙은 system 메시지 참고)
 모든 주장에는 위 데이터의 수치 근거를 붙이고, 추정값에는 '추정'·'~로 산정되었다'처럼 불확실성을 드러내십시오.
 
 다음 섹션을 key 그대로 포함하여 JSON으로 보고서를 작성하세요 (sections: {json.dumps(req.sections, ensure_ascii=False)}):
@@ -1959,8 +2108,10 @@ heading 문자열과 생성 일시·프로바이더·모델은 서버가 채우�
 JSON만 응답하세요 (마크다운 코드블록 불필요)."""
 
     try:
+        # 지시문(고정)은 system 으로, 이번 요청의 수치는 user 로 나눠 보낸다.
+        # 문체·구성이 요청마다 흔들리던 것을 잡고, 프롬프트 캐시가 걸린다.
         text, used_provider, used_model = await _acall_ai(
-            provider, model, None, [{"role": "user", "content": prompt}])
+            provider, model, REPORT_SYSTEM_PROMPT, [{"role": "user", "content": prompt}])
         text = text.strip()
         # 코드펜스 벗기기 + 산문 뒤에 붙은 JSON 건지기는 _extract_json 한 곳에 모았습니다
         # (챗봇에서 실제로 그 두 경우를 다 만났습니다 — 그 함수 주석 참고).
@@ -1972,8 +2123,28 @@ JSON만 응답하세요 (마크다운 코드블록 불필요)."""
         # 요청받은 provider(gemini)가 아니라 그 사실을 그대로 보여준다.
         result["provider"]    = _PROVIDERS[used_provider]["label"]
         result["model"]       = used_model
+        # 요청받은 프로바이더와 실제로 답한 쪽이 다르면(폴백) 그 사실을 싣는다 —
+        # 화면은 "설명·보고서 Gemini" 라고 적어 두는데 문서에는 OpenRouter 가
+        # 찍혀, 같은 화면 안에서 두 이름이 보이던 자리다.
+        if used_provider != provider:
+            result["providerFallback"] = {
+                "requested": _PROVIDERS.get(provider, {}).get("label", provider),
+                "used": _PROVIDERS[used_provider]["label"],
+            }
         # 모델 출력을 계약에 맞춘다 — 이 한 줄이 없으면 아무 검증도 없다.
-        return _validate_draft(result, list(req.sections))
+        out = _validate_draft(result, list(req.sections))
+        # 산문 수치 대조 — 구조는 위에서 맞췄지만 문장 속 숫자는 아무도 안 봤다.
+        pool = _fact_pool(kpi, priorities, sim_ctx, rec_ctx, DATA["meta"].get("cost"),
+                          DATA["meta"].get("grid"))
+        body = "\n".join((sec.get("body") or "") + " " + " ".join(sec.get("bullets") or [])
+                          for sec in out.get("sections", []) if isinstance(sec, dict))
+        suspect = _suspect_numbers(body, pool)
+        if suspect:
+            out["numberWarnings"] = suspect
+            out["disclaimer"] = ("⚠ 입력 데이터에서 확인되지 않는 수치가 있습니다("
+                                 + ", ".join(suspect) + ") — 사용 전 확인하십시오. "
+                                 ) + (out.get("disclaimer") or "")
+        return out
     except json.JSONDecodeError as e:
         # 예전에는 여기만 빈 문서(sections: [])를 내보냈다. 바로 아래
         # except Exception 은 폴백 초안을 주는데, **폴백이 가장 필요한 자리가

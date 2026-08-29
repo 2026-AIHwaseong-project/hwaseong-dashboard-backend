@@ -637,9 +637,14 @@ def test_prompt_has_no_dead_avgmi_and_forbids_invented_numbers(c, monkeypatch):
                         _fake_acall(json.dumps({"sections": [], "tables": []}), seen))
     c.post("/api/v1/reports/draft",
            json={"period": "am", "provider": "claude", "sections": SIX})
-    prompt = seen["text"]
+    prompt = seen["text"]        # _fake_acall 이 system + user 를 합쳐 담는다
     assert "avgMi" not in prompt and "평균 MI" not in prompt, "죽은 avgMi 줄이 남아 있다"
-    assert "없는 수치는 어떤 경우에도 쓰지 마십시오" in prompt, "수치 금지 문장이 없다"
+    # 수치 금지 지시는 2026-08-29 부터 system 프롬프트가 맡는다(user 는 값만 싣는다).
+    # 어느 쪽에 있든 **합쳐진 프롬프트에는 반드시 있어야 한다** — 이 지시가 빠지면
+    # 모델이 없는 숫자를 채워 넣는다.
+    assert ("주어지지 않은 값을 지어내지 않습니다" in prompt
+            or "없는 수치는 어떤 경우에도 쓰지 마십시오" in prompt), "수치 금지 문장이 없다"
+    assert "위에 주어진 수치만 사용하십시오" in prompt, "user 쪽 수치 한정 문장이 없다"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1170,3 +1175,54 @@ def test_refresh_step_dependencies(c, adm, monkeypatch):
     #    도는 형태를 막는다(조용한 무시가 가장 나쁘다)
     r, _ = ask({"steps": ["model"], "dryRun": True, "reason": "예행 오해"})
     assert r.status_code == 400 and "dryRun" in r.json()["detail"]
+
+
+def test_report_number_guard_and_fallback_notice(c, monkeypatch):
+    """산문 수치 대조 가드(2026-08-29) — 구조만 보던 검증에 문장 속 숫자를 더한다.
+
+    독립 검증에서 격자를 '500m×500m'(실제 1km), 단가 1.8억을 '18억 원'으로 적은
+    초안이 그대로 나갔다. 문장을 고치지는 않는다 — 어디가 의심스러운지 표시하고
+    담당자가 판단한다(보고서 자체는 정상 부분이 많아 버리지 않는다)."""
+    import json as _json
+    import server.main as sm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+
+    def ask(body_text):
+        draft = {"title": "검토(안)", "sections": [
+            {"key": "summary", "heading": "1. 검토 개요", "body": body_text, "bullets": []}]}
+        monkeypatch.setattr(sm, "_acall_ai", _fake_acall(_json.dumps(draft)))
+        return c.post("/api/v1/reports/draft",
+                      json={"period": "am", "sections": ["summary"]}).json()
+
+    # ① 입력에 없는 금액·거리 → 경고 + disclaimer 앞머리
+    j = ask("사업비는 월 18억 원이며 500m×500m 격자 기준으로 분석하였다.")
+    assert j.get("numberWarnings"), j.get("numberWarnings")
+    assert "확인되지 않는 수치" in j["disclaimer"]
+
+    # ② 입력에 있는 수치만 쓰면 경고 없음 (786격자·1000m·단가 4,200만 원)
+    j2 = ask("전체 786개 격자를 1000m 기준으로 분석하였다. 정류장 단가는 4,200만 원이다.")
+    assert not j2.get("numberWarnings"), j2.get("numberWarnings")
+    assert "확인되지 않는 수치" not in (j2.get("disclaimer") or "")
+
+
+def test_report_uses_system_prompt(c, monkeypatch):
+    """지시문은 system 으로, 이번 요청 수치는 user 로 나뉘어 나가는가.
+    (문체 고정 + 프롬프트 캐시의 전제 — 고정부에 매번 바뀌는 값이 섞이면 안 된다)"""
+    import json as _json
+    import server.main as sm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+    seen = {}
+
+    async def fake(provider, model, system, messages, **kw):
+        seen["system"] = system
+        seen["user"] = messages[0]["content"]
+        return _json.dumps({"title": "t", "sections": [
+            {"key": "summary", "heading": "1. 검토 개요", "body": "본문", "bullets": []}]}), provider, model
+
+    monkeypatch.setattr(sm, "_acall_ai", fake)
+    c.post("/api/v1/reports/draft", json={"period": "am", "sections": ["summary"]})
+    assert seen["system"] and "공문서 문체" in seen["system"]
+    # 고정부에 시간대·날짜 같은 가변값이 섞이면 캐시가 매번 미스난다
+    assert "출근" not in seen["system"] and "2026-" not in seen["system"]
+    # 가변값은 user 쪽에 있어야 한다
+    assert "출근" in seen["user"]
