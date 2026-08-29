@@ -887,7 +887,7 @@ AI_PROVIDER=claude
 AI_MODEL=claude-sonnet-5
 
 # PostgreSQL (선택 — 현재 미사용)
-DATABASE_URL=postgresql://hw:hw_pass@db:5432/hwaseong
+DATABASE_URL=postgresql://hw:<POSTGRES_PASSWORD>@db:5432/hwaseong
 ```
 
 공공데이터 수집용 키(`DATA_GO_KR_KEY_*`·`TAGO_*`·`GG_BUS_ROUTE_BASE` 등)는 원본 API 를

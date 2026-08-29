@@ -82,10 +82,20 @@ services:
     environment:
       POSTGRES_DB: hwaseong
       POSTGRES_USER: hw
-      POSTGRES_PASSWORD: hw_pass
+      # 비밀번호는 .env 에서 옵니다(2026-08-29). 저장소에 평문으로 두면 공개
+      # 리포에 자격증명이 그대로 남습니다 — 127.0.0.1 바인딩·보안그룹으로 접근은
+      # 막혀 있었지만 값 자체가 노출된 상태였습니다.
+      # ⚠️ POSTGRES_PASSWORD 는 **빈 데이터 디렉터리로 처음 뜰 때만** 적용됩니다.
+      #    이미 만들어진 볼륨에서 값을 바꾸려면 DB 안에서도 함께 바꿔야 합니다:
+      #      docker compose --profile db exec db \
+      #        psql -U hw -d hwaseong -c "ALTER USER hw PASSWORD '새비밀번호';"
+      #    그 뒤 .env 의 POSTGRES_PASSWORD·DATABASE_URL 을 같이 고치고 api 재기동.
+      #    (기본값을 두지 않습니다 — 없으면 DB 가 안 떠서 "설정을 빠뜨렸다"가
+      #     즉시 드러납니다. 조용히 옛 비밀번호로 뜨는 것보다 낫습니다.)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 를 .env 에 설정하세요}
     ports:
       # api 는 compose 네트워크로 붙으므로 외부 노출이 필요 없습니다.
-      # 보안그룹이 막고 있긴 하지만, 자격증명이 hw/hw_pass 라 한 겹 더 둡니다.
+      # 보안그룹이 막고 있긴 하지만 한 겹 더 둡니다.
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data

@@ -98,7 +98,7 @@ docker compose --profile db up -d db
 pip install psycopg2-binary
 
 # 3. 접속 주소를 정합니다 — 아래 두 방법 중 하나
-export DATABASE_URL=postgresql://hw:hw_pass@localhost:5432/hwaseong   # 셸에만
+export DATABASE_URL=postgresql://hw:$POSTGRES_PASSWORD@localhost:5432/hwaseong   # 셸에만
 #   또는 .env 에 한 줄 (96행에 주석으로 들어 있습니다 — # 만 지우면 됩니다)
 
 # 4. 계약 JSON 을 DB 로 적재 (45MB 파이프라인을 다시 돌리지 않습니다)
@@ -112,7 +112,9 @@ python main.py
 ```
 
 접속 정보는 `docker-compose.yml` 에 박혀 있습니다 — DB `hwaseong` · 계정 `hw` ·
-비밀번호 `hw_pass` · 포트 5432 · 이미지 `postgis/postgis:16-3.4-alpine`.
+비밀번호 **`.env` 의 `POSTGRES_PASSWORD`** · 포트 5432 · 이미지 `postgis/postgis:16-3.4-alpine`.
+(2026-08-29 부터 compose 에 기본값이 없습니다 — 안 넣으면 db 가 안 뜹니다.
+이미 쓰던 볼륨의 비밀번호를 바꾸려면 `ALTER USER` 도 함께 — `.env.example` 참고.)
 개발용 기본값이므로 **외부에 노출되는 곳에서는 반드시 바꾸세요.**
 
 #### 켜졌는지 확인하는 법
